@@ -1,51 +1,108 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
+import io
 
-st.set_page_config(page_title="社保公积金看板", layout="wide")
-st.title("📊 2025年全国社保公积金数据看板")
+st.set_page_config(page_title="通用数据看板", layout="wide")
+st.title("📊 通用 Excel / CSV 数据看板")
+st.markdown("上传你的报表文件，自由探索数据，无需改代码")
 
-@st.cache_data
-def load_data():
-    df = pd.read_excel("社保公积金阶段性周期性整理报表_全地区版.xlsx", sheet_name="月度明细数据表", header=1)
-    return df
+# ---------- 上传文件 ----------
+uploaded_file = st.file_uploader("上传 Excel 或 CSV 文件", type=["xlsx", "xls", "csv"])
 
-df = load_data()
-df.columns = df.columns.str.strip()
-df.rename(columns={
-    "所属城市": "city", "所属分公司": "branch", "统计月份": "month",
-    "参保人数": "headcount", "缴费基数": "base",
-    "社保合计-总金额": "social_total", "公积金合计-总金额": "fund_total",
-    "社保+公积金合计-总金额": "grand_total"
-}, inplace=True)
-df["month_num"] = df["month"].str.extract(r"(\d+)月").astype(float)
+if uploaded_file is not None:
+    # 读取文件
+    try:
+        if uploaded_file.name.endswith(".csv"):
+            df = pd.read_csv(uploaded_file)
+        else:
+            # Excel 文件可能含多个 sheet，让用户选
+            sheets = pd.read_excel(uploaded_file, sheet_name=None)
+            if len(sheets) > 1:
+                sheet_name = st.selectbox("选择工作表", list(sheets.keys()))
+                df = sheets[sheet_name]
+            else:
+                df = list(sheets.values())[0]
+    except Exception as e:
+        st.error(f"读取文件出错: {e}")
+        st.stop()
 
-st.sidebar.header("🔎 筛选")
-cities = ["全部"] + sorted(df["city"].unique().tolist())
-selected_city = st.sidebar.selectbox("选择城市", cities)
-month_range = st.sidebar.slider("月份", 1, 12, (1, 12))
+    # 清掉表头前的空行（如果有）
+    df = df.dropna(how="all")
+    df = df.reset_index(drop=True)
 
-filtered_df = df[(df["month_num"] >= month_range[0]) & (df["month_num"] <= month_range[1])]
-if selected_city != "全部":
-    filtered_df = filtered_df[filtered_df["city"] == selected_city]
+    st.success(f"✅ 加载成功！共 {len(df)} 行，{len(df.columns)} 列")
 
-col1, col2, col3, col4 = st.columns(4)
-col1.metric("👥 累计人次", f"{filtered_df['headcount'].sum():,.0f}")
-col2.metric("🏥 社保总额", f"{filtered_df['social_total'].sum():,.2f}")
-col3.metric("🏠 公积金总额", f"{filtered_df['fund_total'].sum():,.2f}")
-col4.metric("💰 合计", f"{filtered_df['grand_total'].sum():,.2f}")
+    # ---------- 侧边栏：数据概览 ----------
+    with st.sidebar:
+        st.subheader("🔍 数据筛选")
 
-city_summary = filtered_df.groupby("city")["grand_total"].sum().reset_index().sort_values("grand_total", ascending=False)
-fig1 = px.bar(city_summary, x="city", y="grand_total", title="各城市缴费总额")
-st.plotly_chart(fig1, use_container_width=True)
+        # 自动识别数字列和文本列
+        num_cols = df.select_dtypes(include=["number"]).columns.tolist()
+        text_cols = df.select_dtypes(include=["object", "category"]).columns.tolist()
 
-if selected_city != "全部":
-    city_trend = filtered_df[filtered_df["city"] == selected_city].sort_values("month_num")
-    fig2 = go.Figure()
-    fig2.add_trace(go.Scatter(x=city_trend["month"], y=city_trend["social_total"], name="社保"))
-    fig2.add_trace(go.Scatter(x=city_trend["month"], y=city_trend["fund_total"], name="公积金"))
-    st.plotly_chart(fig2, use_container_width=True)
+        # 文本列筛选
+        for col in text_cols[:3]:  # 最多显示前3个文本列做筛选，避免太挤
+            unique_vals = df[col].dropna().unique().tolist()
+            if len(unique_vals) < 50:
+                selected = st.multiselect(f"筛选 {col}", unique_vals, default=unique_vals)
+                if selected:
+                    df = df[df[col].isin(selected)]
 
-with st.expander("📋 查看明细"):
-    st.dataframe(filtered_df[["city", "month", "headcount", "grand_total"]])
+        # 数字列范围筛选（显示前2个数字列）
+        for col in num_cols[:2]:
+            if not df[col].dropna().empty:
+                min_val = float(df[col].min())
+                max_val = float(df[col].max())
+                if min_val < max_val:
+                    range_val = st.slider(f"{col} 范围", min_val, max_val, (min_val, max_val))
+                    df = df[(df[col] >= range_val[0]) & (df[col] <= range_val[1])]
+
+        st.caption(f"当前行数: {len(df)}")
+
+    # ---------- 指标卡片 ----------
+    st.subheader("📈 关键指标")
+    cols = st.columns(min(len(num_cols), 6))
+    for i, col in enumerate(num_cols[:6]):
+        if not df[col].dropna().empty:
+            cols[i].metric(col, f"{df[col].sum():,.2f}")
+
+    # ---------- 图表生成器 ----------
+    st.subheader("📊 自由制图")
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        chart_type = st.selectbox("图表类型", ["柱状图", "折线图", "散点图", "饼图", "箱线图"])
+    with col2:
+        x_axis = st.selectbox("X轴 / 分类", [None] + df.columns.tolist())
+    with col3:
+        y_axis = st.selectbox("Y轴 / 数值", [None] + num_cols)
+
+    if x_axis and y_axis:
+        fig = None
+        if chart_type == "柱状图":
+            fig = px.bar(df, x=x_axis, y=y_axis, title=f"{y_axis} 按 {x_axis} 分布")
+        elif chart_type == "折线图":
+            fig = px.line(df, x=x_axis, y=y_axis, title=f"{y_axis} 按 {x_axis} 趋势")
+        elif chart_type == "散点图":
+            fig = px.scatter(df, x=x_axis, y=y_axis, title=f"{x_axis} vs {y_axis}")
+        elif chart_type == "饼图":
+            # 饼图需要聚合，按x分组求和y
+            grouped = df.groupby(x_axis)[y_axis].sum().reset_index()
+            fig = px.pie(grouped, names=x_axis, values=y_axis, title=f"{y_axis} 占比")
+        elif chart_type == "箱线图":
+            fig = px.box(df, x=x_axis, y=y_axis, title=f"{y_axis} 分布")
+
+        if fig:
+            st.plotly_chart(fig, use_container_width=True)
+
+    # ---------- 数据明细 ----------
+    with st.expander("📋 查看全部数据"):
+        st.dataframe(df, use_container_width=True, height=400)
+
+    # ---------- 下载结果 ----------
+    csv = df.to_csv(index=False).encode("utf-8-sig")
+    st.download_button("⬇️ 下载当前筛选后的数据 (CSV)", data=csv, file_name="filtered_data.csv", mime="text/csv")
+
+else:
+    st.info("👈 请先上传你的 Excel 或 CSV 文件")
