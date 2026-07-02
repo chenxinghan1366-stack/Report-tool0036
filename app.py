@@ -663,6 +663,114 @@ with st.sidebar:
         else:
             st.info("暂无模板")
 
+    # ===== 新增：规则管理面板 =====
+    with st.sidebar.expander("⚙️ 规则管理（社保/公积金）"):
+        st.markdown("**当前所有城市规则**")
+        rules = load_rules()
+        if rules:
+            # 显示规则表格（简要）
+            df_rules = pd.DataFrame(rules)
+            st.dataframe(df_rules[['city', 'province', 'unit_social', 'personal_social', 'unit_fund', 'personal_fund', 'source_quote']], use_container_width=True)
+            
+            # 选择要编辑的城市
+            cities = sorted(set(r['city'] for r in rules))
+            selected_city = st.selectbox("选择城市进行编辑", [""] + cities)
+            if selected_city:
+                rule = next((r for r in rules if r['city'] == selected_city), None)
+                if rule:
+                    with st.form(key=f"edit_rule_{selected_city}"):
+                        st.write(f"编辑 **{selected_city}** 的规则")
+                        new_unit_social = st.number_input("单位社保比例", value=float(rule['unit_social']), step=0.001, format="%.3f")
+                        new_personal_social = st.number_input("个人社保比例", value=float(rule['personal_social']), step=0.001, format="%.3f")
+                        new_unit_fund = st.number_input("单位公积金比例", value=float(rule['unit_fund']), step=0.001, format="%.3f")
+                        new_personal_fund = st.number_input("个人公积金比例", value=float(rule['personal_fund']), step=0.001, format="%.3f")
+                        new_social_min = st.number_input("社保基数下限", value=float(rule.get('social_min', 0)), step=100)
+                        new_social_max = st.number_input("社保基数上限", value=float(rule.get('social_max', 999999)), step=100)
+                        new_fund_min = st.number_input("公积金基数下限", value=float(rule.get('fund_min', 0)), step=100)
+                        new_fund_max = st.number_input("公积金基数上限", value=float(rule.get('fund_max', 999999)), step=100)
+                        new_source = st.text_input("来源文号", value=rule.get('source_quote', ''))
+                        submitted = st.form_submit_button("保存修改")
+                        if submitted:
+                            # 更新规则
+                            updated_rules = []
+                            for r in rules:
+                                if r['id'] == rule['id']:
+                                    r.update({
+                                        'unit_social': new_unit_social,
+                                        'personal_social': new_personal_social,
+                                        'unit_fund': new_unit_fund,
+                                        'personal_fund': new_personal_fund,
+                                        'social_min': new_social_min,
+                                        'social_max': new_social_max,
+                                        'fund_min': new_fund_min,
+                                        'fund_max': new_fund_max,
+                                        'source_quote': new_source
+                                    })
+                                updated_rules.append(r)
+                            save_rules(updated_rules)
+                            st.success("规则已更新！")
+                            st.rerun()
+            # 新增城市规则
+            with st.expander("➕ 新增城市规则"):
+                with st.form(key="add_rule"):
+                    new_city = st.text_input("城市名称")
+                    new_province = st.text_input("所属省份")
+                    new_unit_social = st.number_input("单位社保比例", value=0.16, step=0.001, format="%.3f")
+                    new_personal_social = st.number_input("个人社保比例", value=0.08, step=0.001, format="%.3f")
+                    new_unit_fund = st.number_input("单位公积金比例", value=0.12, step=0.001, format="%.3f")
+                    new_personal_fund = st.number_input("个人公积金比例", value=0.12, step=0.001, format="%.3f")
+                    new_social_min = st.number_input("社保基数下限", value=0, step=100)
+                    new_social_max = st.number_input("社保基数上限", value=999999, step=100)
+                    new_fund_min = st.number_input("公积金基数下限", value=0, step=100)
+                    new_fund_max = st.number_input("公积金基数上限", value=999999, step=100)
+                    new_source = st.text_input("来源文号")
+                    submitted = st.form_submit_button("添加")
+                    if submitted and new_city:
+                        new_rule = {
+                            'id': str(uuid.uuid4())[:8],
+                            'city': new_city,
+                            'province': new_province,
+                            'unit_social': new_unit_social,
+                            'personal_social': new_personal_social,
+                            'unit_fund': new_unit_fund,
+                            'personal_fund': new_personal_fund,
+                            'social_min': new_social_min,
+                            'social_max': new_social_max,
+                            'fund_min': new_fund_min,
+                            'fund_max': new_fund_max,
+                            'source_quote': new_source,
+                            'is_default': 0
+                        }
+                        rules.append(new_rule)
+                        save_rules(rules)
+                        st.success(f"已添加 {new_city} 的规则！")
+                        st.rerun()
+            # 重置为默认规则
+            if st.button("🔄 重置所有规则为系统默认值"):
+                if st.checkbox("确认重置？此操作将覆盖所有自定义规则"):
+                    default_rules = []
+                    for r in PROVINCE_DEFAULT_RULES:
+                        default_rules.append({
+                            'id': str(uuid.uuid4())[:8],
+                            'city': r['city'],
+                            'province': r.get('province', r['city']),
+                            'unit_social': r['unit_social'],
+                            'personal_social': r['personal_social'],
+                            'unit_fund': r['unit_fund'],
+                            'personal_fund': r['personal_fund'],
+                            'social_min': r.get('social_min', 0),
+                            'social_max': r.get('social_max', 999999),
+                            'fund_min': r.get('fund_min', 0),
+                            'fund_max': r.get('fund_max', 999999),
+                            'source_quote': r.get('source_quote', '省份默认'),
+                            'is_default': 1
+                        })
+                    save_rules(default_rules)
+                    st.success("已重置为系统默认规则！")
+                    st.rerun()
+        else:
+            st.info("暂无规则，请初始化或添加")
+
 # ===== 主体 =====
 st.subheader("📊 导入数据预览")
 data_source_info = ""
@@ -801,7 +909,7 @@ if selected_companies and report_type:
         st.write(f"必填字段：{selected_template.get('required_fields', '')}")
     with col_b:
         st.markdown("**🔗 来源信息**")
-        st.write(f"来源URL：[{selected_template.get('source_url', '#')}]({selected_template.get('source_url', '#'))")
+        st.write(f"来源URL：[{selected_template.get('source_url', '#')}]({selected_template.get('source_url', '#')})")
         if 'province' in selected_template and selected_template['province']:
             st.write(f"适用地区：{selected_template['province']} {selected_template.get('city','')} {selected_template.get('district','')}")
         st.write(f"报表类型：{report_type}")
@@ -868,6 +976,16 @@ if selected_companies and report_type:
     st.info(f"📌 数据来源：{data_source_text}")
     st.info(f"📌 统计口径：{period_label}")
     
+    # 增强：显示每个公司的规则匹配情况
+    rule_status = []
+    for comp in selected_companies:
+        r = get_rule_for_city(comp['city'])
+        if r:
+            rule_status.append(f"{comp['company_name']} → {r['city']} (规则: {r.get('source_quote', '系统默认')})")
+        else:
+            rule_status.append(f"{comp['company_name']} → {comp['city']} (⚠️ 无规则，将使用默认值)")
+    st.info("📌 规则匹配情况：\n" + "\n".join(rule_status))
+    
     missing_rules = []
     for comp in selected_companies:
         rule = get_rule_for_city(comp['city'])
@@ -882,12 +1000,15 @@ if selected_companies and report_type:
     st.subheader("📊 报表预览（生成前确认）")
     preview_data = []
     for comp in selected_companies:
+        rule = get_rule_for_city(comp['city'])
+        rule_source = rule.get('source_quote', '未配置') if rule else '未配置'
         preview_data.append({
             '公司': comp['company_name'],
             '城市': comp['city'],
             '模板': selected_template['template_name'],
             '匹配级别': match_level,
-            '统计口径': period_label
+            '统计口径': period_label,
+            '规则来源': rule_source
         })
     st.dataframe(pd.DataFrame(preview_data), use_container_width=True)
     
@@ -903,7 +1024,43 @@ if selected_companies and report_type:
             
             for comp in selected_companies:
                 try:
+                    # ===== 获取规则（增强处理） =====
                     rule = get_rule_for_city(comp['city'])
+                    if rule is None:
+                        # 尝试从默认规则中查找（如果因某种原因未加载到数据库）
+                        default_rule = None
+                        for dr in PROVINCE_DEFAULT_RULES:
+                            if dr['city'] == comp['city']:
+                                default_rule = dr
+                                break
+                        if default_rule:
+                            st.warning(f"⚠️ 城市 {comp['city']} 未在规则库中找到，将使用系统默认规则（{default_rule['source_quote']}）")
+                            rule = {
+                                'unit_social': default_rule['unit_social'],
+                                'personal_social': default_rule['personal_social'],
+                                'unit_fund': default_rule['unit_fund'],
+                                'personal_fund': default_rule['personal_fund'],
+                                'social_min': default_rule.get('social_min', 0),
+                                'social_max': default_rule.get('social_max', 999999),
+                                'fund_min': default_rule.get('fund_min', 0),
+                                'fund_max': default_rule.get('fund_max', 999999),
+                                'source_quote': default_rule.get('source_quote', '系统默认')
+                            }
+                        else:
+                            # 完全未找到，使用硬编码默认值
+                            st.warning(f"⚠️ 城市 {comp['city']} 没有任何规则，将使用通用默认值（16%/8%）")
+                            rule = {
+                                'unit_social': 0.16,
+                                'personal_social': 0.08,
+                                'unit_fund': 0.12,
+                                'personal_fund': 0.12,
+                                'social_min': 0,
+                                'social_max': 999999,
+                                'fund_min': 0,
+                                'fund_max': 999999,
+                                'source_quote': '系统默认'
+                            }
+
                     fields = selected_template.get('required_fields', '').split(',')
                     if not fields or not fields[0]:
                         fields = ['纳税人识别号', '公司名称', '申报金额']
@@ -987,7 +1144,7 @@ if selected_companies and report_type:
                     ws.merge_cells(start_row=3, start_column=1, end_row=3, end_column=len(fields) if fields else 1)
                     
                     ws.insert_rows(4)
-                    ws['A4'] = f'数据来源：{data_source_text}  统计口径：{period_label}'
+                    ws['A4'] = f'数据来源：{data_source_text}  统计口径：{period_label}  规则来源：{rule.get("source_quote", "未配置")}'
                     ws['A4'].font = Font(color='666666', size=10)
                     ws.merge_cells(start_row=4, start_column=1, end_row=4, end_column=len(fields) if fields else 1)
                     
@@ -1063,11 +1220,12 @@ if selected_companies and report_type:
                     ws_annual.append(['全年总费用', round(grand_total, 2)])
                     ws_annual.append(['报告生成时间', datetime.now().strftime('%Y-%m-%d %H:%M:%S')])
                     ws_annual.append(['数据来源', data_source_text])
+                    ws_annual.append(['规则来源', rule.get('source_quote', '未配置')])
                     
                     # 审计日志
                     audit = wb.create_sheet("审计日志")
                     audit.append(['操作时间', '操作类型', '操作人', '详情'])
-                    audit.append([datetime.now().isoformat(), 'GENERATED', '系统', f'公司:{comp["company_name"]}, 城市:{comp["city"]}, 模板:{selected_template["template_name"]}, 匹配级别:{match_level}, 数据来源:{data_source_text}, 统计口径:{period_label}'])
+                    audit.append([datetime.now().isoformat(), 'GENERATED', '系统', f'公司:{comp["company_name"]}, 城市:{comp["city"]}, 模板:{selected_template["template_name"]}, 匹配级别:{match_level}, 数据来源:{data_source_text}, 统计口径:{period_label}, 规则:{rule.get("source_quote", "未配置")}'])
                     
                     output = BytesIO()
                     wb.save(output)
@@ -1081,6 +1239,7 @@ if selected_companies and report_type:
                         '模板': selected_template['template_name'],
                         '匹配级别': match_level,
                         '统计口径': period_label,
+                        '规则来源': rule.get('source_quote', '未配置'),
                         '状态': '待复核'
                     })
                     
