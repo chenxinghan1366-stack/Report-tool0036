@@ -60,30 +60,25 @@ def restore_backup(backup_file):
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    # 公司表
     c.execute('''CREATE TABLE IF NOT EXISTS companies (
         id TEXT PRIMARY KEY, company_name TEXT, province TEXT, city TEXT, district TEXT, tax_id TEXT
     )''')
-    # 模板表
     c.execute('''CREATE TABLE IF NOT EXISTS templates (
         id TEXT PRIMARY KEY, province TEXT, city TEXT, district TEXT, report_type TEXT,
         template_name TEXT, template_version TEXT, source_url TEXT, source_authority TEXT,
         publish_date TEXT, required_fields TEXT, status TEXT, file_hash TEXT, file_type TEXT,
         is_custom BOOLEAN DEFAULT 0, field_mapping_source TEXT
     )''')
-    # 自定义模板
     c.execute('''CREATE TABLE IF NOT EXISTS custom_templates (
         id TEXT PRIMARY KEY, name TEXT, file_data BLOB, field_mapping TEXT,
         sheet_name TEXT, created_at TEXT, updated_at TEXT
     )''')
-    # 规则表
     c.execute('''CREATE TABLE IF NOT EXISTS rules (
         id TEXT PRIMARY KEY, city TEXT, province TEXT, unit_social REAL, personal_social REAL,
         unit_fund REAL, personal_fund REAL, social_min REAL, social_max REAL,
         fund_min REAL, fund_max REAL, source_quote TEXT, is_default BOOLEAN DEFAULT 0,
         rule_version TEXT, effective_date TEXT
     )''')
-    # 导出历史
     c.execute('''CREATE TABLE IF NOT EXISTS export_history (
         id TEXT PRIMARY KEY, company_id TEXT, template_id TEXT, company_name TEXT,
         city TEXT, province TEXT, report_type TEXT, period_type TEXT, generated_at TEXT,
@@ -91,20 +86,17 @@ def init_db():
         data_source TEXT, month_used TEXT, year_used TEXT, custom_period TEXT,
         batch_id TEXT, job_name TEXT, field_mapping TEXT
     )''')
-    # 来源注册表
     c.execute('''CREATE TABLE IF NOT EXISTS source_registry (
         id TEXT PRIMARY KEY, authority_type TEXT, province TEXT, city TEXT, district TEXT,
         authority_name TEXT, official_site_name TEXT, source_url TEXT, source_level TEXT,
         source_section TEXT, is_official BOOLEAN, crawl_allowed BOOLEAN, last_checked TEXT,
         status TEXT, notes TEXT, document_name TEXT, document_version TEXT, publish_year TEXT
     )''')
-    # 批次作业表
     c.execute('''CREATE TABLE IF NOT EXISTS job_batches (
         id TEXT PRIMARY KEY, batch_name TEXT, created_at TEXT, status TEXT,
         total_companies INTEGER, total_reports INTEGER, review_status TEXT,
         parameters TEXT, created_by TEXT
     )''')
-    # 作业记录详情
     c.execute('''CREATE TABLE IF NOT EXISTS job_details (
         id TEXT PRIMARY KEY, batch_id TEXT, company_id TEXT, company_name TEXT,
         city TEXT, province TEXT, report_type TEXT, period_type TEXT,
@@ -120,7 +112,6 @@ init_db()
 def migrate_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    # 检查并添加新列
     tables_to_check = [
         ('templates', ['field_mapping_source']),
         ('rules', ['rule_version', 'effective_date']),
@@ -134,7 +125,6 @@ def migrate_db():
             if col not in existing_cols:
                 c.execute(f"ALTER TABLE {table} ADD COLUMN {col} TEXT")
     
-    # 检查并创建新表
     c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='job_batches'")
     if not c.fetchone():
         c.execute('''CREATE TABLE job_batches (
@@ -201,7 +191,6 @@ def load_job_batches():
 def load_job_details(batch_id):
     return safe_execute_query("SELECT * FROM job_details WHERE batch_id=? ORDER BY generated_at DESC", (batch_id,))
 
-# ========== 保存函数 ==========
 def save_companies(companies):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -542,7 +531,6 @@ def ensure_default_rules():
         save_rules(existing_rules)
     return added
 
-# ========== 修复公司省份数据 ==========
 def fix_companies_province():
     companies = load_companies()
     if not companies:
@@ -709,7 +697,6 @@ def parse_multiple_files(files):
         all_companies.extend(companies)
         all_sheets.extend(sheets)
         unmapped_cities.update(unmapped)
-    # 去重
     unique = []
     seen = set()
     for c in all_companies:
@@ -722,7 +709,7 @@ def parse_multiple_files(files):
 # ========== 数据校验函数 ==========
 def validate_data(df, rules):
     if df is None or df.empty:
-        return {'total_rows': 0, 'error_rows': 0, 'details': [], 'summary': {}, 'error_rows_detail': {}}
+        return {'total_rows': 0, 'error_rows': 0, 'details': {}, 'summary': {}, 'error_rows_detail': {}}
     
     errors = {}
     city_col = None
@@ -820,7 +807,6 @@ def get_data_source_info(df):
                     info['month'] = df[col].iloc[0] if not df[col].empty else '12'
     return info
 
-# ========== 生成批次ID ==========
 def generate_batch_id():
     return f"BATCH_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{str(uuid.uuid4())[:4]}"
 
@@ -845,6 +831,36 @@ page = st.sidebar.radio("选择功能", [
     "📋 导出历史与复核",
     "💾 备份与恢复"
 ])
+
+# ===== 【新增】全局Sheet选择器 =====
+if 'uploaded_files' in st.session_state and st.session_state['uploaded_files']:
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("📂 数据Sheet选择")
+    files = st.session_state['uploaded_files']
+    if len(files) > 1:
+        file_names = [f.name for f in files]
+        selected_file_name = st.sidebar.selectbox("选择数据文件", file_names, key="global_file_select")
+        selected_file = next(f for f in files if f.name == selected_file_name)
+    else:
+        selected_file = files[0]
+    try:
+        xls = pd.ExcelFile(selected_file)
+        sheets = xls.sheet_names
+        current_sheet = st.session_state.get('data_sheet_name', sheets[0] if sheets else '')
+        idx = sheets.index(current_sheet) if current_sheet in sheets else 0
+        selected_sheet = st.sidebar.selectbox("选择Sheet", sheets, index=idx, key="global_sheet_select")
+        if selected_sheet != st.session_state.get('data_sheet_name'):
+            df = pd.read_excel(selected_file, sheet_name=selected_sheet)
+            st.session_state['imported_df'] = df
+            st.session_state['data_sheet_name'] = selected_sheet
+            rules = load_rules()
+            st.session_state['validation_report'] = validate_data(df, rules)
+            st.sidebar.success(f"✅ 已加载: {selected_sheet}")
+            st.rerun()
+        else:
+            st.sidebar.info(f"当前: {selected_sheet}")
+    except Exception as e:
+        st.sidebar.error(f"读取Sheet失败: {e}")
 
 # ===== 工作台 =====
 if page == "📊 工作台":
@@ -912,65 +928,62 @@ elif page == "📤 数据导入":
                 if valid_companies:
                     save_companies(valid_companies)
                     st.success(f"成功提取 {len(valid_companies)} 家公司，来自 {len(uploaded_files)} 个文件")
-                    st.session_state['all_sheets'] = all_sheets
+                    # 保存文件对象和sheets到session
                     st.session_state['uploaded_files'] = uploaded_files
-                    
-                    # 选择数据Sheet
-                    default_sheet = None
-                    for kw in ['明细', '月度', '数据', '工资', '社保', '员工', '月报']:
-                        for s in all_sheets:
-                            if kw in s:
-                                default_sheet = s
+                    st.session_state['all_sheets'] = all_sheets
+                    # 自动选择第一个文件的第一个sheet作为默认
+                    if uploaded_files:
+                        first_file = uploaded_files[0]
+                        xls = pd.ExcelFile(first_file)
+                        sheets = xls.sheet_names
+                        default_sheet = None
+                        for kw in ['明细', '月度', '数据', '工资', '社保', '员工', '月报']:
+                            for s in sheets:
+                                if kw in s:
+                                    default_sheet = s
+                                    break
+                            if default_sheet:
                                 break
+                        if not default_sheet and sheets:
+                            default_sheet = sheets[0]
                         if default_sheet:
-                            break
-                    if not default_sheet and all_sheets:
-                        default_sheet = all_sheets[0]
-                    
-                    st.info("💡 请选择包含月度明细数据的 Sheet")
-                    selected_sheet = st.selectbox("选择数据Sheet", all_sheets, index=all_sheets.index(default_sheet) if default_sheet in all_sheets else 0)
-                    if selected_sheet:
-                        try:
-                            df_data = pd.read_excel(uploaded_files[0], sheet_name=selected_sheet)
+                            df_data = pd.read_excel(first_file, sheet_name=default_sheet)
                             st.session_state['imported_df'] = df_data
-                            st.session_state['data_sheet_name'] = selected_sheet
-                            st.success(f"已加载 Sheet「{selected_sheet}」，共 {len(df_data)} 行")
+                            st.session_state['data_sheet_name'] = default_sheet
                             rules = load_rules()
-                            validation_report = validate_data(df_data, rules)
-                            st.session_state['validation_report'] = validation_report
-                            
-                            # 显示数据质量报告
-                            st.subheader("📊 数据质量报告")
-                            col1, col2, col3 = st.columns(3)
-                            with col1:
-                                st.metric("总行数", validation_report['total_rows'])
-                            with col2:
-                                st.metric("异常行数", validation_report['error_rows'])
-                            with col3:
-                                st.metric("正常行数", validation_report['total_rows'] - validation_report['error_rows'])
-                            
-                            if validation_report['error_rows'] > 0:
-                                st.warning(f"⚠️ 发现 {validation_report['error_rows']} 行数据存在问题")
-                                with st.expander("查看异常详情"):
-                                    for row, errs in validation_report['details'].items():
-                                        st.write(f"**第 {row} 行**：{', '.join(errs)}")
-                            else:
-                                st.success("✅ 所有数据校验通过！")
-                        except Exception as e:
-                            st.error(f"读取Sheet失败：{e}")
+                            st.session_state['validation_report'] = validate_data(df_data, rules)
+                            st.success(f"已自动加载 Sheet「{default_sheet}」，共 {len(df_data)} 行")
                 else:
                     st.error("未能识别任何有效公司，请确认城市列包含已配置的城市")
             else:
                 st.warning("未识别到公司数据，请确认Excel包含「城市」和「公司」列")
     
-    # 显示当前公司列表
-    with st.expander("🏢 当前公司列表"):
-        companies = load_companies()
-        if companies:
-            st.dataframe(pd.DataFrame(companies))
-            st.caption(f"共 {len(companies)} 家公司")
-        else:
-            st.info("暂无数据")
+    # 显示当前加载的数据预览
+    if 'imported_df' in st.session_state and st.session_state['imported_df'] is not None:
+        st.subheader("📊 数据预览")
+        df = st.session_state['imported_df']
+        st.dataframe(df.head(10), use_container_width=True)
+        st.caption(f"当前Sheet: {st.session_state.get('data_sheet_name', '未知')}，共 {len(df)} 行")
+        
+        # 显示质量报告
+        if 'validation_report' in st.session_state:
+            report = st.session_state['validation_report']
+            st.subheader("📊 数据质量报告")
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("总行数", report['total_rows'])
+            with col2:
+                st.metric("异常行数", report['error_rows'])
+            with col3:
+                st.metric("正常行数", report['total_rows'] - report['error_rows'])
+            
+            if report['error_rows'] > 0:
+                st.warning(f"⚠️ 发现 {report['error_rows']} 行数据存在问题")
+                with st.expander("查看异常详情"):
+                    for row, errs in report['details'].items():
+                        st.write(f"**第 {row} 行**：{', '.join(errs)}")
+            else:
+                st.success("✅ 所有数据校验通过！")
 
 # ===== 依据库管理 =====
 elif page == "📚 依据库管理":
@@ -1241,7 +1254,6 @@ elif page == "📋 导出历史与复核":
             display_cols = ['company_name', 'city', 'report_type', 'period_type', 'data_source', 'generated_at', 'review_status', 'batch_id']
             st.dataframe(df_hist[display_cols], use_container_width=True)
             
-            # 批次作业
             batches = load_job_batches()
             if batches:
                 st.subheader("📦 批次作业")
@@ -1300,7 +1312,6 @@ elif page == "💾 备份与恢复":
 st.markdown("---")
 st.subheader("🚀 快速生成报表")
 
-# 获取公司列表
 companies = load_companies()
 if not companies:
     st.info("👈 请先在「数据导入」页面上传包含公司/城市数据的Excel")
@@ -1358,7 +1369,6 @@ else:
     selected_companies = [c for c in company_list if c['company_name'] in selected_company_names]
     
     if selected_companies and report_type:
-        # 匹配模板
         matched, match_level, candidates = match_template_with_details(province, city, district, report_type)
         custom_templates = load_custom_templates()
         
@@ -1401,11 +1411,8 @@ else:
                 'source_url': '#'
             }
         
-        # 显示匹配结果和预览
         with st.expander("📋 查看模板匹配与字段映射", expanded=True):
             st.success(f"✅ 已匹配模板：{selected_template['template_name']}")
-            
-            # 字段映射来源
             fields = selected_template.get('required_fields', '').split(',')
             if fields and fields[0]:
                 st.markdown("**字段映射来源**")
@@ -1421,13 +1428,11 @@ else:
             if not selected_template:
                 st.error("请先选择模板")
             else:
-                # 检查数据异常
                 if 'validation_report' in st.session_state and st.session_state['validation_report']['error_rows'] > 0:
                     st.warning("⚠️ 当前数据存在异常（见数据质量报告），是否继续生成？")
                     if not st.checkbox("继续生成（忽略异常）", key="ignore_errors"):
                         st.stop()
                 
-                # 创建批次
                 batch_id = generate_batch_id()
                 batch_name = f"批量导出_{datetime.now().strftime('%Y%m%d_%H%M')}"
                 save_batch_job({
@@ -1446,7 +1451,6 @@ else:
                 summary = []
                 errors = []
                 job_details = []
-                
                 data_source_text = st.session_state.get('data_sheet_name', '未知')
                 
                 for comp in selected_companies:
@@ -1483,7 +1487,6 @@ else:
                         if not fields or not fields[0]:
                             fields = ['纳税人识别号', '公司名称', '申报金额']
                         
-                        # 从导入数据中取值
                         if 'imported_df' in st.session_state and st.session_state['imported_df'] is not None:
                             df_data = st.session_state['imported_df']
                             company_col = None
@@ -1565,7 +1568,6 @@ else:
                         ws['A4'].font = Font(color='666666', size=10)
                         ws.merge_cells(start_row=4, start_column=1, end_row=4, end_column=len(fields) if fields else 1)
                         
-                        # 年检汇总
                         ws_annual = wb.create_sheet("年检汇总")
                         ws_annual.append(['年检汇总数据'])
                         ws_annual.merge_cells('A1:B1')
