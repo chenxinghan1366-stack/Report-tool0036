@@ -418,29 +418,40 @@ PROVINCE_DEFAULT_RULES = [
      'fund_min': 1800, 'fund_max': 21600, 'source_quote': '南人社发〔2024〕4号'},
 ]
 
-# ========== 初始化默认数据 ==========
-def init_default_data():
-    if not load_rules():
-        all_rules = []
-        for r in PROVINCE_DEFAULT_RULES:
-            all_rules.append({
+# ========== 初始化/补全规则 ==========
+def ensure_default_rules():
+    """确保所有默认城市规则都存在，缺失则插入，已存在则保留原有值（不覆盖）"""
+    existing_rules = load_rules()
+    existing_cities = {normalize_name(r['city']) for r in existing_rules}
+    
+    added = 0
+    for dr in PROVINCE_DEFAULT_RULES:
+        norm_city = normalize_name(dr['city'])
+        if norm_city not in existing_cities:
+            new_rule = {
                 'id': str(uuid.uuid4())[:8],
-                'city': r['city'],
-                'province': r.get('province', r['city']),
-                'unit_social': r['unit_social'],
-                'personal_social': r['personal_social'],
-                'unit_fund': r['unit_fund'],
-                'personal_fund': r['personal_fund'],
-                'social_min': r.get('social_min', 0),
-                'social_max': r.get('social_max', 999999),
-                'fund_min': r.get('fund_min', 0),
-                'fund_max': r.get('fund_max', 999999),
-                'source_quote': r.get('source_quote', '省份默认'),
-                'is_default': 1 if r['city'] == r.get('province', r['city']) else 0
-            })
-        save_rules(all_rules)
+                'city': dr['city'],
+                'province': dr['province'],
+                'unit_social': dr['unit_social'],
+                'personal_social': dr['personal_social'],
+                'unit_fund': dr['unit_fund'],
+                'personal_fund': dr['personal_fund'],
+                'social_min': dr.get('social_min', 0),
+                'social_max': dr.get('social_max', 999999),
+                'fund_min': dr.get('fund_min', 0),
+                'fund_max': dr.get('fund_max', 999999),
+                'source_quote': dr.get('source_quote', '省份默认'),
+                'is_default': 1
+            }
+            existing_rules.append(new_rule)
+            added += 1
+    
+    if added > 0:
+        save_rules(existing_rules)
+        print(f"[系统] 已补全 {added} 个缺失的城市规则")
 
-init_default_data()
+# 执行补全
+ensure_default_rules()
 
 # ========== 标准化匹配 ==========
 def normalize_name(name):
@@ -507,18 +518,14 @@ def apply_custom_template_mapping(wb, data, mapping):
         if field in data:
             ws[cell_ref] = data[field]
 
-# ========== 【核心修复1】解析Excel时自动匹配省份 ==========
+# ========== 【核心修复】解析Excel：使用默认规则映射省份 ==========
 def parse_uploaded_excel(file):
     xls = pd.ExcelFile(file)
     sheets = xls.sheet_names
     all_companies = []
-    # 加载规则用于匹配省份
-    rules = load_rules()
-    # 构建城市→省份映射（优先使用规则，其次使用默认）
+    
+    # 构建城市→省份映射（直接使用默认规则，不依赖数据库）
     city_province_map = {}
-    for r in rules:
-        city_province_map[normalize_name(r['city'])] = r['province']
-    # 补充默认规则
     for dr in PROVINCE_DEFAULT_RULES:
         city_province_map[normalize_name(dr['city'])] = dr['province']
     
@@ -550,9 +557,8 @@ def parse_uploaded_excel(file):
                         company = str(row[company_col]) if pd.notna(row[company_col]) else ''
                         district = str(row[district_col]) if district_col and pd.notna(row[district_col]) else ''
                         if city and company:
-                            # 根据城市名查找省份
                             norm_city = normalize_name(city)
-                            province = city_province_map.get(norm_city, city)  # 找不到就用城市名本身
+                            province = city_province_map.get(norm_city, city)  # 找不到就用城市名本身（直辖市也如此）
                             all_companies.append({
                                 'company_name': company,
                                 'province': province,
@@ -571,7 +577,7 @@ def parse_uploaded_excel(file):
             unique.append(c)
     return unique
 
-# ========== 【核心修复2】get_rule_for_city 去后缀匹配 ==========
+# ========== 获取规则（去后缀匹配） ==========
 def get_rule_for_city(city):
     if not city:
         return None
@@ -657,7 +663,6 @@ with st.sidebar:
         if companies:
             st.dataframe(pd.DataFrame(companies))
             st.caption(f"共 {len(companies)} 家公司")
-            # 新增清空按钮
             if st.button("🗑️ 清空所有公司数据", key="clear_companies"):
                 if st.checkbox("确认清空？此操作不可恢复", key="confirm_clear"):
                     save_companies([])
@@ -807,20 +812,17 @@ all_provinces = sorted(set(c['province'] for c in companies if c['province']))
 col1, col2, col3 = st.columns(3)
 with col1:
     province = st.selectbox("省份", [""] + all_provinces)
-    # 根据省份过滤城市（确保城市只属于该省份）
     if province:
         cities = sorted(set(c['city'] for c in companies if c['province'] == province))
     else:
         cities = sorted(set(c['city'] for c in companies))
     city = st.selectbox("城市", [""] + cities)
 with col2:
-    # 进一步过滤区县
     if province and city:
         districts = sorted(set(c['district'] for c in companies if c['province'] == province and c['city'] == city))
     else:
         districts = []
     district = st.selectbox("区县", [""] + districts)
-    # 过滤公司列表
     if province and city:
         company_list = [c for c in companies if c['province'] == province and c['city'] == city and (not district or c['district'] == district)]
     else:
@@ -967,7 +969,7 @@ if selected_companies and report_type:
         if not preview_df.empty:
             st.dataframe(preview_df, use_container_width=True)
     
-    # ===== 数据校验（含规则匹配增强） =====
+    # ===== 数据校验 =====
     st.subheader("📋 数据校验")
     data_source_text = "未知"
     if 'imported_df' in st.session_state and st.session_state['imported_df'] is not None:
@@ -983,12 +985,12 @@ if selected_companies and report_type:
     st.info(f"📌 数据来源：{data_source_text}")
     st.info(f"📌 统计口径：{period_label}")
     
-    # ---- 增强规则匹配显示 ----
+    # ---- 规则匹配显示 ----
     rule_status = []
     for comp in selected_companies:
         rule = get_rule_for_city(comp['city'])
         if rule is None:
-            # 从默认规则中尝试查找（兜底）
+            # 从默认规则中查找（兜底）
             default_rule = next((dr for dr in PROVINCE_DEFAULT_RULES if normalize_name(dr['city']) == normalize_name(comp['city'])), None)
             if default_rule:
                 rule_status.append(f"{comp['company_name']} → {comp['city']} (将使用默认规则：{default_rule['source_quote']})")
@@ -998,10 +1000,8 @@ if selected_companies and report_type:
             rule_status.append(f"{comp['company_name']} → {comp['city']} (规则: {rule.get('source_quote', '系统默认')})")
     st.info("📌 规则匹配情况：\n" + "\n".join(rule_status))
     
-    # 不再单独显示缺失警告，因为上面已经详细列出
     missing = [comp['city'] for comp in selected_companies if get_rule_for_city(comp['city']) is None]
     if missing:
-        # 但如果有完全未匹配的，额外提示
         st.info(f"ℹ️ 部分城市({', '.join(set(missing))})未在规则库中，将使用系统默认或通用值。")
     else:
         st.success("✅ 所有城市已匹配到规则")
@@ -1012,7 +1012,6 @@ if selected_companies and report_type:
     for comp in selected_companies:
         rule = get_rule_for_city(comp['city'])
         if rule is None:
-            # 尝试找默认规则
             default_rule = next((dr for dr in PROVINCE_DEFAULT_RULES if normalize_name(dr['city']) == normalize_name(comp['city'])), None)
             rule_source = default_rule['source_quote'] if default_rule else '通用默认'
         else:
