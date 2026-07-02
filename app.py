@@ -450,12 +450,11 @@ def ensure_default_rules():
         save_rules(existing_rules)
     return added
 
-# ========== 修复公司省份数据（将无法映射的置空） ==========
+# ========== 修复公司省份数据 ==========
 def fix_companies_province():
     companies = load_companies()
     if not companies:
         return 0, 0
-    # 构建映射
     city_province = {}
     for dr in PROVINCE_DEFAULT_RULES:
         city_province[normalize_name(dr['city'])] = dr['province']
@@ -473,7 +472,6 @@ def fix_companies_province():
             comp['province'] = correct_province
             fixed += 1
         elif not correct_province and original_province != '':
-            # 无法映射，置空
             comp['province'] = ''
             fixed += 1
         updated_companies.append(comp)
@@ -545,14 +543,15 @@ def apply_custom_template_mapping(wb, data, mapping):
         if field in data:
             ws[cell_ref] = data[field]
 
-# ========== 解析Excel（不fallback到city） ==========
+# ========== 解析Excel（增加更多sheet关键词） ==========
 def parse_uploaded_excel(file):
     xls = pd.ExcelFile(file)
     sheets = xls.sheet_names
     all_companies = []
     unmapped_cities = set()
+    data_sheet_name = None  # 用于识别数据sheet
     
-    # 构建城市→省份映射（从默认规则 + 数据库）
+    # 构建城市→省份映射
     city_province_map = {}
     for dr in PROVINCE_DEFAULT_RULES:
         key = normalize_name(dr['city'])
@@ -560,6 +559,15 @@ def parse_uploaded_excel(file):
     for r in load_rules():
         key = normalize_name(r['city'])
         city_province_map[key] = r['province']
+    
+    # 先尝试找数据sheet（用于后续数据预览）
+    for s in sheets:
+        s_lower = s.lower()
+        if any(keyword in s_lower for keyword in ['明细', '月度', '数据', '年检', '主数据', '月报', '季报']):
+            data_sheet_name = s
+            break
+    if not data_sheet_name:
+        data_sheet_name = sheets[0] if sheets else None
     
     for sheet in sheets:
         try:
@@ -590,7 +598,7 @@ def parse_uploaded_excel(file):
                         district = str(row[district_col]) if district_col and pd.notna(row[district_col]) else ''
                         if city and company:
                             norm_city = normalize_name(city)
-                            province = city_province_map.get(norm_city, '')  # 找不到就置空
+                            province = city_province_map.get(norm_city, '')
                             if not province:
                                 unmapped_cities.add(city)
                             all_companies.append({
@@ -611,9 +619,9 @@ def parse_uploaded_excel(file):
         if key not in seen:
             seen.add(key)
             unique.append(c)
-    return unique, unmapped_cities
+    return unique, unmapped_cities, data_sheet_name
 
-# ========== 获取规则（去后缀） ==========
+# ========== 获取规则 ==========
 def get_rule_for_city(city):
     if not city:
         return None
@@ -644,11 +652,11 @@ st.set_page_config(page_title="智能报表系统", layout="wide")
 st.title("📋 智能报表系统（含自定义模板与备份）")
 st.markdown("**上传Excel → 选择模板 → 选择统计口径 → 生成待复核版Excel**")
 
-# 补全规则并自动修复公司省份数据
+# 补全规则并自动修复
 ensure_default_rules()
 fixed, total = fix_companies_province()
 if fixed > 0:
-    st.success(f"✅ 自动修复了 {fixed}/{total} 家公司的省份数据，省份下拉框将只显示有效省份。")
+    st.success(f"✅ 自动修复了 {fixed}/{total} 家公司的省份数据")
 
 # ===== 侧边栏 =====
 with st.sidebar:
@@ -657,29 +665,25 @@ with st.sidebar:
     
     if uploaded_file:
         with st.spinner("正在解析Excel..."):
-            companies, unmapped = parse_uploaded_excel(uploaded_file)
+            companies, unmapped, data_sheet = parse_uploaded_excel(uploaded_file)
             if companies:
-                # 去除 province 为空的公司（无法映射）
                 valid_companies = [c for c in companies if c['province']]
                 if len(valid_companies) < len(companies):
                     st.warning(f"⚠️ 有 {len(companies) - len(valid_companies)} 家公司因城市无法识别（{', '.join(unmapped)}）而被忽略，请在规则管理中手动添加这些城市。")
                 if valid_companies:
                     save_companies(valid_companies)
                     st.success(f"成功提取 {len(valid_companies)} 家公司")
-                    try:
-                        xls = pd.ExcelFile(uploaded_file)
-                        data_sheet = None
-                        for s in xls.sheet_names:
-                            if '明细' in s or '月度' in s or '数据' in s:
-                                data_sheet = s
-                                break
-                        if data_sheet:
+                    # 读取数据sheet
+                    if data_sheet:
+                        try:
                             df_data = pd.read_excel(uploaded_file, sheet_name=data_sheet)
                             st.session_state['imported_df'] = df_data
                             st.session_state['data_sheet_name'] = data_sheet
                             st.success(f"已读取数据Sheet「{data_sheet}」，共{len(df_data)}行")
-                    except:
-                        pass
+                        except:
+                            pass
+                    else:
+                        st.warning("未找到数据Sheet，无法进行数据预览。")
                 else:
                     st.error("未能识别任何有效公司，请确认城市列包含已配置的城市（如上海、北京、南京等）。")
             else:
@@ -859,7 +863,7 @@ if not companies:
     st.info("👈 请先在侧边栏上传包含公司/城市数据的Excel")
     st.stop()
 
-# 过滤掉 province 为空的记录（虽然理论上已修复）
+# 过滤掉 province 为空的记录
 valid_companies = [c for c in companies if c['province']]
 if len(valid_companies) < len(companies):
     st.warning(f"⚠️ 有 {len(companies) - len(valid_companies)} 家公司的省份无法识别，已忽略。")
@@ -933,7 +937,8 @@ if selected_companies and report_type:
             options[f"📄 官方模板：{c['template_name']}（{c['province']}）"] = {'type': 'official', 'data': c}
     for ct in custom_templates:
         options[f"⭐ 自定义模板：{ct['name']}"] = {'type': 'custom', 'data': ct}
-    options["🔄 通用模板（系统内置）"] = {'type': 'general', 'data': None}
+    # 通用模板 - 增加更好的描述
+    options["🔄 通用模板（系统内置，适用于无官方模板场景）"] = {'type': 'general', 'data': None}
     
     if len(options) > 1:
         st.info("💡 请选择要使用的模板")
@@ -960,14 +965,15 @@ if selected_companies and report_type:
         template_type = "自定义模板"
         match_level = "自定义模板"
     else:
+        # 通用模板 - 使用更丰富的元数据
         selected_template = {
             'id': 'gen001',
             'template_name': f'{report_type}通用申报表',
-            'template_version': 'v1.0',
-            'source_authority': '系统内置',
-            'publish_date': datetime.now().strftime('%Y-%m-%d'),
+            'template_version': '系统内置 v1.0',
+            'source_authority': 'Streamlit 智能报表系统',
+            'publish_date': '内置，随系统更新',
             'required_fields': '纳税人识别号,公司名称,申报金额',
-            'source_url': '#'
+            'source_url': '系统内置模板，无外部来源'  # 改为说明文字
         }
         match_level = "通用模板"
     
@@ -982,7 +988,7 @@ if selected_companies and report_type:
         st.write(f"必填字段：{selected_template.get('required_fields', '')}")
     with col_b:
         st.markdown("**🔗 来源信息**")
-        st.write(f"来源URL：[{selected_template.get('source_url', '#')}]({selected_template.get('source_url', '#')})")
+        st.write(f"来源URL：{selected_template.get('source_url', '#')}")
         if 'province' in selected_template and selected_template['province']:
             st.write(f"适用地区：{selected_template['province']} {selected_template.get('city','')} {selected_template.get('district','')}")
         st.write(f"报表类型：{report_type}")
@@ -1033,14 +1039,9 @@ if selected_companies and report_type:
     st.subheader("📋 数据校验")
     data_source_text = "未知"
     if 'imported_df' in st.session_state and st.session_state['imported_df'] is not None:
-        data_source_text = st.session_state.get('data_sheet_name', '未知Sheet')
-        info = get_data_source_info(st.session_state['imported_df'])
-        if info.get('year'):
-            data_source_text += f"（年份：{info.get('year')}"
-        if info.get('month'):
-            data_source_text += f"，月份：{info.get('month')}"
-        if info.get('year') or info.get('month'):
-            data_source_text += "）"
+        data_source_text = st.session_state.get('data_sheet_name', '上传文件的第一个Sheet')
+    else:
+        data_source_text = "未加载数据Sheet（可能是文件结构问题）"
     
     st.info(f"📌 数据来源：{data_source_text}")
     st.info(f"📌 统计口径：{period_label}")
