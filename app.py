@@ -543,14 +543,12 @@ def apply_custom_template_mapping(wb, data, mapping):
         if field in data:
             ws[cell_ref] = data[field]
 
-# ========== 解析Excel ==========
+# ========== 解析Excel（返回所有sheet和公司） ==========
 def parse_uploaded_excel(file):
     xls = pd.ExcelFile(file)
     sheets = xls.sheet_names
     all_companies = []
     unmapped_cities = set()
-    data_sheet_name = None
-    
     # 构建城市→省份映射
     city_province_map = {}
     for dr in PROVINCE_DEFAULT_RULES:
@@ -559,15 +557,6 @@ def parse_uploaded_excel(file):
     for r in load_rules():
         key = normalize_name(r['city'])
         city_province_map[key] = r['province']
-    
-    # 寻找数据sheet
-    for s in sheets:
-        s_lower = s.lower()
-        if any(keyword in s_lower for keyword in ['明细', '月度', '数据', '年检', '主数据', '月报', '季报']):
-            data_sheet_name = s
-            break
-    if not data_sheet_name:
-        data_sheet_name = sheets[0] if sheets else None
     
     for sheet in sheets:
         try:
@@ -619,7 +608,7 @@ def parse_uploaded_excel(file):
         if key not in seen:
             seen.add(key)
             unique.append(c)
-    return unique, unmapped_cities, data_sheet_name
+    return unique, unmapped_cities, sheets
 
 # ========== 获取规则 ==========
 def get_rule_for_city(city):
@@ -665,7 +654,7 @@ with st.sidebar:
     
     if uploaded_file:
         with st.spinner("正在解析Excel..."):
-            companies, unmapped, data_sheet = parse_uploaded_excel(uploaded_file)
+            companies, unmapped, all_sheets = parse_uploaded_excel(uploaded_file)
             if companies:
                 valid_companies = [c for c in companies if c['province']]
                 if len(valid_companies) < len(companies):
@@ -673,20 +662,27 @@ with st.sidebar:
                 if valid_companies:
                     save_companies(valid_companies)
                     st.success(f"成功提取 {len(valid_companies)} 家公司")
-                    if data_sheet:
-                        try:
-                            df_data = pd.read_excel(uploaded_file, sheet_name=data_sheet)
-                            st.session_state['imported_df'] = df_data
-                            st.session_state['data_sheet_name'] = data_sheet
-                            st.success(f"已读取数据Sheet「{data_sheet}」，共{len(df_data)}行")
-                        except:
-                            pass
-                    else:
-                        st.warning("未找到数据Sheet，无法进行数据预览。")
+                    # 保存所有sheet名称到session
+                    st.session_state['all_sheets'] = all_sheets
+                    st.session_state['uploaded_file'] = uploaded_file
                 else:
                     st.error("未能识别任何有效公司，请确认城市列包含已配置的城市（如上海、北京、南京等）。")
             else:
                 st.warning("未识别到公司数据，请确认Excel包含「城市」和「公司」列")
+    
+    # 如果已上传文件且有多sheet，让用户选择数据sheet
+    if 'all_sheets' in st.session_state and st.session_state['all_sheets']:
+        all_sheets = st.session_state['all_sheets']
+        default_sheet = next((s for s in all_sheets if any(kw in s.lower() for kw in ['明细','月度','数据','年检','主数据','月报','季报'])), all_sheets[0])
+        selected_sheet = st.selectbox("选择数据Sheet（用于预览和报表填充）", all_sheets, index=all_sheets.index(default_sheet))
+        if selected_sheet:
+            try:
+                df_data = pd.read_excel(st.session_state['uploaded_file'], sheet_name=selected_sheet)
+                st.session_state['imported_df'] = df_data
+                st.session_state['data_sheet_name'] = selected_sheet
+                st.success(f"已加载 Sheet「{selected_sheet}」，共 {len(df_data)} 行")
+            except Exception as e:
+                st.error(f"读取Sheet失败：{e}")
     
     # ===== 备份管理 =====
     with st.sidebar.expander("💾 备份与恢复"):
@@ -859,7 +855,7 @@ if 'imported_df' in st.session_state and st.session_state['imported_df'] is not 
         data_source_info += f"，月份：{month}"
     st.caption(f"共 {len(df_preview)} 行数据 | {data_source_info}")
 else:
-    st.info("上传Excel后，此处将显示数据预览")
+    st.info("上传Excel后，请选择数据Sheet（在侧边栏）以显示数据预览")
 
 companies = load_companies()
 if not companies:
@@ -1042,7 +1038,7 @@ if selected_companies and report_type:
     if 'imported_df' in st.session_state and st.session_state['imported_df'] is not None:
         data_source_text = st.session_state.get('data_sheet_name', '上传文件的第一个Sheet')
     else:
-        data_source_text = "未加载数据Sheet（可能是文件结构问题）"
+        data_source_text = "未加载数据Sheet（请先在侧边栏选择数据Sheet）"
     
     st.info(f"📌 数据来源：{data_source_text}")
     st.info(f"📌 统计口径：{period_label}")
