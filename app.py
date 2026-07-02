@@ -610,6 +610,96 @@ def parse_uploaded_excel(file):
             unique.append(c)
     return unique, unmapped_cities, sheets
 
+# ========== 【新增】数据校验函数 ==========
+def validate_data(df, rules):
+    """
+    对 DataFrame 进行数据质量校验
+    返回：校验报告 dict (总行数, 异常行数, 异常详情)
+    """
+    if df is None or df.empty:
+        return {'total_rows': 0, 'error_rows': 0, 'details': [], 'summary': {}}
+    
+    errors = []
+    # 1. 检查城市列是否存在且不为空
+    city_col = None
+    for col in df.columns:
+        if '城市' in col:
+            city_col = col
+            break
+    if city_col is None:
+        errors.append('未找到城市列，无法进行城市规则校验')
+        return {'total_rows': len(df), 'error_rows': 0, 'details': errors, 'summary': {'城市列缺失': 1}}
+    
+    # 构建城市→规则映射
+    city_rule_map = {normalize_name(r['city']): r for r in rules}
+    # 检查城市是否在规则库中
+    missing_city_rows = []
+    for idx, row in df.iterrows():
+        city = str(row[city_col]) if pd.notna(row[city_col]) else ''
+        if not city:
+            errors.append(f'第{idx+1}行：城市为空')
+            missing_city_rows.append(idx)
+        else:
+            norm_city = normalize_name(city)
+            if norm_city not in city_rule_map:
+                errors.append(f'第{idx+1}行：城市"{city}"未在规则库中')
+                missing_city_rows.append(idx)
+    
+    # 2. 检查数值列（如基数、比例等）
+    # 自动识别包含“基数”或“比例”的列
+    numeric_cols = []
+    for col in df.columns:
+        if '基数' in col or '比例' in col or '金额' in col or '费用' in col:
+            numeric_cols.append(col)
+    for col in numeric_cols:
+        for idx, val in df[col].items():
+            if pd.notna(val):
+                try:
+                    num = float(str(val).replace(',', ''))
+                    if num < 0:
+                        errors.append(f'第{idx+1}行：列"{col}"值为负数({num})')
+                except:
+                    errors.append(f'第{idx+1}行：列"{col}"值无法转换为数字')
+    
+    # 3. 检查公司名称列
+    company_col = None
+    for col in df.columns:
+        if '公司' in col or '分公司' in col:
+            company_col = col
+            break
+    if company_col is not None:
+        for idx, val in df[company_col].items():
+            if pd.isna(val) or str(val).strip() == '':
+                errors.append(f'第{idx+1}行：公司名称为空')
+    
+    # 汇总错误行
+    error_rows = set()
+    for err in errors:
+        if '第' in err and '行' in err:
+            try:
+                row_num = int(err.split('第')[1].split('行')[0])
+                error_rows.add(row_num)
+            except:
+                pass
+    # 统计错误类型
+    summary = {}
+    for err in errors:
+        if '城市' in err:
+            summary['城市问题'] = summary.get('城市问题', 0) + 1
+        elif '空' in err:
+            summary['空值'] = summary.get('空值', 0) + 1
+        elif '数字' in err:
+            summary['格式问题'] = summary.get('格式问题', 0) + 1
+        else:
+            summary['其他'] = summary.get('其他', 0) + 1
+    
+    return {
+        'total_rows': len(df),
+        'error_rows': len(error_rows),
+        'details': errors,
+        'summary': summary
+    }
+
 # ========== 获取规则 ==========
 def get_rule_for_city(city):
     if not city:
@@ -681,6 +771,10 @@ with st.sidebar:
                 st.session_state['imported_df'] = df_data
                 st.session_state['data_sheet_name'] = selected_sheet
                 st.success(f"已加载 Sheet「{selected_sheet}」，共 {len(df_data)} 行")
+                # 新增：自动校验数据
+                rules = load_rules()
+                validation_report = validate_data(df_data, rules)
+                st.session_state['validation_report'] = validation_report
             except Exception as e:
                 st.error(f"读取Sheet失败：{e}")
     
@@ -854,6 +948,28 @@ if 'imported_df' in st.session_state and st.session_state['imported_df'] is not 
     if month:
         data_source_info += f"，月份：{month}"
     st.caption(f"共 {len(df_preview)} 行数据 | {data_source_info}")
+    
+    # ===== 【新增】显示数据质量报告 =====
+    if 'validation_report' in st.session_state:
+        report = st.session_state['validation_report']
+        st.subheader("📊 数据质量报告")
+        col_q1, col_q2, col_q3 = st.columns(3)
+        with col_q1:
+            st.metric("总行数", report['total_rows'])
+        with col_q2:
+            st.metric("异常行数", report['error_rows'], delta=f"-{report['total_rows'] - report['error_rows']} 正常")
+        with col_q3:
+            st.metric("正常行数", report['total_rows'] - report['error_rows'])
+        
+        if report['error_rows'] > 0:
+            st.warning(f"⚠️ 发现 {report['error_rows']} 行数据存在问题，请检查以下详情：")
+            # 显示错误详情
+            st.text_area("错误详情", "\n".join(report['details']), height=150)
+            # 显示错误类型统计
+            st.write("**错误类型分布**")
+            st.dataframe(pd.DataFrame(report['summary'].items(), columns=['错误类型', '次数']))
+        else:
+            st.success("✅ 所有数据校验通过，未发现异常！")
 else:
     st.info("上传Excel后，请选择数据Sheet（在侧边栏）以显示数据预览")
 
@@ -1089,6 +1205,11 @@ if selected_companies and report_type:
         if not selected_template:
             st.error("请先选择模板")
         else:
+            # 生成前再次检查数据质量（若存在异常则提示）
+            if 'validation_report' in st.session_state and st.session_state['validation_report']['error_rows'] > 0:
+                st.warning("⚠️ 当前数据存在异常（见数据质量报告），是否继续生成？")
+                if not st.checkbox("继续生成（忽略异常）"):
+                    st.stop()
             generated_files = []
             summary = []
             errors = []
