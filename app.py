@@ -750,11 +750,12 @@ with st.sidebar:
                 if rule:
                     with st.form(key=f"edit_rule_{selected_city}"):
                         st.write(f"编辑 **{selected_city}** 的规则")
+                        # 比例输入，浮点数
                         new_unit_social = st.number_input("单位社保比例", value=float(rule['unit_social']), step=0.001, format="%.3f")
                         new_personal_social = st.number_input("个人社保比例", value=float(rule['personal_social']), step=0.001, format="%.3f")
                         new_unit_fund = st.number_input("单位公积金比例", value=float(rule['unit_fund']), step=0.001, format="%.3f")
                         new_personal_fund = st.number_input("个人公积金比例", value=float(rule['personal_fund']), step=0.001, format="%.3f")
-                        # 修复：step 改为 100.0
+                        # 基数输入，全部使用浮点数，step=100.0
                         new_social_min = st.number_input("社保基数下限", value=float(rule.get('social_min', 0)), step=100.0)
                         new_social_max = st.number_input("社保基数上限", value=float(rule.get('social_max', 999999)), step=100.0)
                         new_fund_min = st.number_input("公积金基数下限", value=float(rule.get('fund_min', 0)), step=100.0)
@@ -784,14 +785,16 @@ with st.sidebar:
                 with st.form(key="add_rule"):
                     new_city = st.text_input("城市名称")
                     new_province = st.text_input("所属省份")
+                    # 比例输入，浮点数
                     new_unit_social = st.number_input("单位社保比例", value=0.16, step=0.001, format="%.3f")
                     new_personal_social = st.number_input("个人社保比例", value=0.08, step=0.001, format="%.3f")
                     new_unit_fund = st.number_input("单位公积金比例", value=0.12, step=0.001, format="%.3f")
                     new_personal_fund = st.number_input("个人公积金比例", value=0.12, step=0.001, format="%.3f")
-                    new_social_min = st.number_input("社保基数下限", value=0, step=100.0)
-                    new_social_max = st.number_input("社保基数上限", value=999999, step=100.0)
-                    new_fund_min = st.number_input("公积金基数下限", value=0, step=100.0)
-                    new_fund_max = st.number_input("公积金基数上限", value=999999, step=100.0)
+                    # 基数输入，全部使用浮点数
+                    new_social_min = st.number_input("社保基数下限", value=0.0, step=100.0)
+                    new_social_max = st.number_input("社保基数上限", value=999999.0, step=100.0)
+                    new_fund_min = st.number_input("公积金基数下限", value=0.0, step=100.0)
+                    new_fund_max = st.number_input("公积金基数上限", value=999999.0, step=100.0)
                     new_source = st.text_input("来源文号")
                     submitted = st.form_submit_button("添加")
                     if submitted and new_city:
