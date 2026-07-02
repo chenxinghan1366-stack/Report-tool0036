@@ -300,7 +300,7 @@ def save_source_registry(sources):
     conn.close()
     backup_database()
 
-# ========== 全国默认规则（36个城市） ==========
+# ========== 全国默认规则（扩充了济南等城市） ==========
 PROVINCE_DEFAULT_RULES = [
     {'city': '上海', 'province': '上海', 'unit_social': 0.16, 'personal_social': 0.08,
      'unit_fund': 0.07, 'personal_fund': 0.07, 'social_min': 7310, 'social_max': 36549,
@@ -353,6 +353,9 @@ PROVINCE_DEFAULT_RULES = [
     {'city': '青岛', 'province': '山东', 'unit_social': 0.16, 'personal_social': 0.08,
      'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3746, 'social_max': 18726,
      'fund_min': 2010, 'fund_max': 23496, 'source_quote': '青人社发〔2024〕4号'},
+    {'city': '济南', 'province': '山东', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3746, 'social_max': 18726,
+     'fund_min': 2010, 'fund_max': 23496, 'source_quote': '济人社发〔2024〕5号'},
     {'city': '西安', 'province': '陕西', 'unit_social': 0.16, 'personal_social': 0.08,
      'unit_fund': 0.10, 'personal_fund': 0.10, 'social_min': 3957, 'social_max': 19784,
      'fund_min': 1950, 'fund_max': 23556, 'source_quote': '西人社发〔2024〕6号'},
@@ -447,6 +450,37 @@ def ensure_default_rules():
         save_rules(existing_rules)
     return added
 
+# ========== 修复公司省份数据（将无法映射的置空） ==========
+def fix_companies_province():
+    companies = load_companies()
+    if not companies:
+        return 0, 0
+    # 构建映射
+    city_province = {}
+    for dr in PROVINCE_DEFAULT_RULES:
+        city_province[normalize_name(dr['city'])] = dr['province']
+    for r in load_rules():
+        city_province[normalize_name(r['city'])] = r['province']
+    
+    fixed = 0
+    updated_companies = []
+    for comp in companies:
+        original_province = comp['province']
+        city = comp['city']
+        norm_city = normalize_name(city)
+        correct_province = city_province.get(norm_city)
+        if correct_province and correct_province != original_province:
+            comp['province'] = correct_province
+            fixed += 1
+        elif not correct_province and original_province != '':
+            # 无法映射，置空
+            comp['province'] = ''
+            fixed += 1
+        updated_companies.append(comp)
+    if fixed > 0:
+        save_companies(updated_companies)
+    return fixed, len(companies)
+
 # ========== 标准化函数 ==========
 def normalize_name(name):
     if not name:
@@ -511,17 +545,21 @@ def apply_custom_template_mapping(wb, data, mapping):
         if field in data:
             ws[cell_ref] = data[field]
 
-# ========== 解析Excel（强制使用默认规则映射省份） ==========
+# ========== 解析Excel（不fallback到city） ==========
 def parse_uploaded_excel(file):
     xls = pd.ExcelFile(file)
     sheets = xls.sheet_names
     all_companies = []
+    unmapped_cities = set()
     
-    # 构建城市→省份映射（直接从默认规则）
+    # 构建城市→省份映射（从默认规则 + 数据库）
     city_province_map = {}
     for dr in PROVINCE_DEFAULT_RULES:
         key = normalize_name(dr['city'])
         city_province_map[key] = dr['province']
+    for r in load_rules():
+        key = normalize_name(r['city'])
+        city_province_map[key] = r['province']
     
     for sheet in sheets:
         try:
@@ -552,16 +590,9 @@ def parse_uploaded_excel(file):
                         district = str(row[district_col]) if district_col and pd.notna(row[district_col]) else ''
                         if city and company:
                             norm_city = normalize_name(city)
-                            province = city_province_map.get(norm_city)
+                            province = city_province_map.get(norm_city, '')  # 找不到就置空
                             if not province:
-                                # 尝试从数据库规则查找（万一有补充）
-                                rules = load_rules()
-                                for r in rules:
-                                    if normalize_name(r['city']) == norm_city:
-                                        province = r['province']
-                                        break
-                            if not province:
-                                province = city  # fallback，但会提示
+                                unmapped_cities.add(city)
                             all_companies.append({
                                 'company_name': company,
                                 'province': province,
@@ -580,7 +611,7 @@ def parse_uploaded_excel(file):
         if key not in seen:
             seen.add(key)
             unique.append(c)
-    return unique
+    return unique, unmapped_cities
 
 # ========== 获取规则（去后缀） ==========
 def get_rule_for_city(city):
@@ -613,8 +644,11 @@ st.set_page_config(page_title="智能报表系统", layout="wide")
 st.title("📋 智能报表系统（含自定义模板与备份）")
 st.markdown("**上传Excel → 选择模板 → 选择统计口径 → 生成待复核版Excel**")
 
-# 补全规则
+# 补全规则并自动修复公司省份数据
 ensure_default_rules()
+fixed, total = fix_companies_province()
+if fixed > 0:
+    st.success(f"✅ 自动修复了 {fixed}/{total} 家公司的省份数据，省份下拉框将只显示有效省份。")
 
 # ===== 侧边栏 =====
 with st.sidebar:
@@ -623,24 +657,31 @@ with st.sidebar:
     
     if uploaded_file:
         with st.spinner("正在解析Excel..."):
-            companies = parse_uploaded_excel(uploaded_file)
+            companies, unmapped = parse_uploaded_excel(uploaded_file)
             if companies:
-                save_companies(companies)
-                st.success(f"成功提取 {len(companies)} 家公司")
-                try:
-                    xls = pd.ExcelFile(uploaded_file)
-                    data_sheet = None
-                    for s in xls.sheet_names:
-                        if '明细' in s or '月度' in s or '数据' in s:
-                            data_sheet = s
-                            break
-                    if data_sheet:
-                        df_data = pd.read_excel(uploaded_file, sheet_name=data_sheet)
-                        st.session_state['imported_df'] = df_data
-                        st.session_state['data_sheet_name'] = data_sheet
-                        st.success(f"已读取数据Sheet「{data_sheet}」，共{len(df_data)}行")
-                except:
-                    pass
+                # 去除 province 为空的公司（无法映射）
+                valid_companies = [c for c in companies if c['province']]
+                if len(valid_companies) < len(companies):
+                    st.warning(f"⚠️ 有 {len(companies) - len(valid_companies)} 家公司因城市无法识别（{', '.join(unmapped)}）而被忽略，请在规则管理中手动添加这些城市。")
+                if valid_companies:
+                    save_companies(valid_companies)
+                    st.success(f"成功提取 {len(valid_companies)} 家公司")
+                    try:
+                        xls = pd.ExcelFile(uploaded_file)
+                        data_sheet = None
+                        for s in xls.sheet_names:
+                            if '明细' in s or '月度' in s or '数据' in s:
+                                data_sheet = s
+                                break
+                        if data_sheet:
+                            df_data = pd.read_excel(uploaded_file, sheet_name=data_sheet)
+                            st.session_state['imported_df'] = df_data
+                            st.session_state['data_sheet_name'] = data_sheet
+                            st.success(f"已读取数据Sheet「{data_sheet}」，共{len(df_data)}行")
+                    except:
+                        pass
+                else:
+                    st.error("未能识别任何有效公司，请确认城市列包含已配置的城市（如上海、北京、南京等）。")
             else:
                 st.warning("未识别到公司数据，请确认Excel包含「城市」和「公司」列")
     
@@ -675,6 +716,10 @@ with st.sidebar:
                     save_companies([])
                     st.success("已清空所有公司数据")
                     st.rerun()
+            if st.button("🔧 修复省份数据", key="fix_province"):
+                fixed2, total2 = fix_companies_province()
+                st.success(f"已修复 {fixed2}/{total2} 条记录")
+                st.rerun()
         else:
             st.info("暂无数据")
     
@@ -813,6 +858,14 @@ companies = load_companies()
 if not companies:
     st.info("👈 请先在侧边栏上传包含公司/城市数据的Excel")
     st.stop()
+
+# 过滤掉 province 为空的记录（虽然理论上已修复）
+valid_companies = [c for c in companies if c['province']]
+if len(valid_companies) < len(companies):
+    st.warning(f"⚠️ 有 {len(companies) - len(valid_companies)} 家公司的省份无法识别，已忽略。")
+    companies = valid_companies
+    if not companies:
+        st.stop()
 
 all_provinces = sorted(set(c['province'] for c in companies if c['province']))
 
