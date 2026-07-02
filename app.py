@@ -832,7 +832,7 @@ page = st.sidebar.radio("选择功能", [
     "💾 备份与恢复"
 ])
 
-# ===== 【新增】全局Sheet选择器 =====
+# ===== 全局Sheet选择器 =====
 if 'uploaded_files' in st.session_state and st.session_state['uploaded_files']:
     st.sidebar.markdown("---")
     st.sidebar.subheader("📂 数据Sheet选择")
@@ -912,6 +912,10 @@ if page == "📊 工作台":
 elif page == "📤 数据导入":
     st.subheader("📤 数据导入（支持多文件）")
     
+    # 新增：导入模式选择
+    import_mode = st.radio("导入模式", ["智能导入（自动识别结构）", "普通导入（手动选择列，开发中）"], index=0, horizontal=True)
+    st.caption("智能导入将自动识别城市、公司等列；普通导入可自定义列映射（开发中，当前与智能导入相同）")
+    
     uploaded_files = st.file_uploader(
         "选择Excel文件（支持多个 .xlsx）", 
         type=["xlsx"], 
@@ -928,10 +932,8 @@ elif page == "📤 数据导入":
                 if valid_companies:
                     save_companies(valid_companies)
                     st.success(f"成功提取 {len(valid_companies)} 家公司，来自 {len(uploaded_files)} 个文件")
-                    # 保存文件对象和sheets到session
                     st.session_state['uploaded_files'] = uploaded_files
                     st.session_state['all_sheets'] = all_sheets
-                    # 自动选择第一个文件的第一个sheet作为默认
                     if uploaded_files:
                         first_file = uploaded_files[0]
                         xls = pd.ExcelFile(first_file)
@@ -958,14 +960,12 @@ elif page == "📤 数据导入":
             else:
                 st.warning("未识别到公司数据，请确认Excel包含「城市」和「公司」列")
     
-    # 显示当前加载的数据预览
     if 'imported_df' in st.session_state and st.session_state['imported_df'] is not None:
         st.subheader("📊 数据预览")
         df = st.session_state['imported_df']
         st.dataframe(df.head(10), use_container_width=True)
         st.caption(f"当前Sheet: {st.session_state.get('data_sheet_name', '未知')}，共 {len(df)} 行")
         
-        # 显示质量报告
         if 'validation_report' in st.session_state:
             report = st.session_state['validation_report']
             st.subheader("📊 数据质量报告")
@@ -1308,7 +1308,7 @@ elif page == "💾 备份与恢复":
         if path:
             st.success(f"备份成功：{os.path.basename(path)}")
 
-# ===== 底部：报表生成功能（在所有页面都可访问） =====
+# ===== 底部：快速生成报表（含“依据匹配”详情） =====
 st.markdown("---")
 st.subheader("🚀 快速生成报表")
 
@@ -1411,11 +1411,55 @@ else:
                 'source_url': '#'
             }
         
-        with st.expander("📋 查看模板匹配与字段映射", expanded=True):
-            st.success(f"✅ 已匹配模板：{selected_template['template_name']}")
+        # ---- 新增：依据匹配详情卡片 ----
+        with st.expander("📋 依据匹配（来源 / 模板 / 规则）", expanded=True):
+            st.markdown("**匹配结果**")
+            col_a, col_b = st.columns(2)
+            with col_a:
+                st.markdown("**来源**")
+                if template_choice['type'] == 'official':
+                    st.write(f"来源名称：{selected_template.get('source_authority', '未知')}")
+                    st.write(f"来源URL：{selected_template.get('source_url', '#')}")
+                    st.write(f"文档版本：{selected_template.get('template_version', 'v1.0')}")
+                elif template_choice['type'] == 'custom':
+                    st.write("来源：自定义模板")
+                    st.write(f"名称：{selected_template['name']}")
+                else:
+                    st.write("来源：系统内置通用模板")
+                st.markdown("**模板**")
+                st.write(f"模板名称：{selected_template['template_name']}")
+                st.write(f"模板版本：{selected_template.get('template_version', 'v1.0')}")
+                st.write(f"匹配级别：{match_level if matched else '通用模板'}")
+            with col_b:
+                st.markdown("**规则**")
+                # 显示匹配到的规则
+                if selected_companies:
+                    first_comp = selected_companies[0]
+                    rule = get_rule_for_city(first_comp['city'])
+                    if rule:
+                        st.write(f"规则来源：{rule.get('source_quote', '未配置')}")
+                        st.write(f"规则版本：{rule.get('rule_version', 'v1.0')}")
+                        st.write(f"生效日期：{rule.get('effective_date', '未知')}")
+                    else:
+                        st.write("规则：未匹配，将使用默认值")
+                else:
+                    st.write("规则：待选择公司后显示")
+            # 显示所有公司的规则匹配状态
+            st.markdown("**所有公司规则匹配状态**")
+            rule_status = []
+            for comp in selected_companies:
+                r = get_rule_for_city(comp['city'])
+                if r:
+                    rule_status.append(f"{comp['company_name']} → {comp['city']} (规则：{r.get('source_quote', '默认')})")
+                else:
+                    rule_status.append(f"{comp['company_name']} → {comp['city']} (⚠️ 将使用默认值)")
+            st.write("\n".join(rule_status))
+        
+        # ---- 保留原有的模板预览（可折叠） ----
+        with st.expander("📋 字段映射预览", expanded=False):
             fields = selected_template.get('required_fields', '').split(',')
             if fields and fields[0]:
-                st.markdown("**字段映射来源**")
+                st.markdown("**字段列表**")
                 mapping_data = []
                 for f in fields:
                     source = selected_template.get('field_mapping_source', '自动映射')
@@ -1726,7 +1770,7 @@ else:
                     for err in errors:
                         st.warning(err)
                 if generated_files:
-                    st.success(f"✅ 成功生成 {len(generated_files)} 份报表（批次：{batch_name}）")
+                    st.success(f"✅ 成功生成 {len(generated_files)} 份报表（批次ID：{batch_id}，状态：已完成）")
                     st.dataframe(pd.DataFrame(summary), use_container_width=True)
                     if len(generated_files) > 1:
                         zip_buffer = BytesIO()
