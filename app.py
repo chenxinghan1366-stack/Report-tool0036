@@ -507,10 +507,21 @@ def apply_custom_template_mapping(wb, data, mapping):
         if field in data:
             ws[cell_ref] = data[field]
 
+# ========== 【核心修复1】解析Excel时自动匹配省份 ==========
 def parse_uploaded_excel(file):
     xls = pd.ExcelFile(file)
     sheets = xls.sheet_names
     all_companies = []
+    # 加载规则用于匹配省份
+    rules = load_rules()
+    # 构建城市→省份映射（优先使用规则，其次使用默认）
+    city_province_map = {}
+    for r in rules:
+        city_province_map[normalize_name(r['city'])] = r['province']
+    # 补充默认规则
+    for dr in PROVINCE_DEFAULT_RULES:
+        city_province_map[normalize_name(dr['city'])] = dr['province']
+    
     for sheet in sheets:
         try:
             df = pd.read_excel(file, sheet_name=sheet, header=None)
@@ -539,11 +550,9 @@ def parse_uploaded_excel(file):
                         company = str(row[company_col]) if pd.notna(row[company_col]) else ''
                         district = str(row[district_col]) if district_col and pd.notna(row[district_col]) else ''
                         if city and company:
-                            province = city
-                            for r in PROVINCE_DEFAULT_RULES:
-                                if r['city'] == city and r.get('province'):
-                                    province = r['province']
-                                    break
+                            # 根据城市名查找省份
+                            norm_city = normalize_name(city)
+                            province = city_province_map.get(norm_city, city)  # 找不到就用城市名本身
                             all_companies.append({
                                 'company_name': company,
                                 'province': province,
@@ -562,7 +571,7 @@ def parse_uploaded_excel(file):
             unique.append(c)
     return unique
 
-# ========== 【核心修复】get_rule_for_city 支持去后缀匹配 ==========
+# ========== 【核心修复2】get_rule_for_city 去后缀匹配 ==========
 def get_rule_for_city(city):
     if not city:
         return None
@@ -642,11 +651,18 @@ with st.sidebar:
             if path:
                 st.success(f"备份成功：{os.path.basename(path)}")
     
+    # ===== 公司列表（增加清空按钮） =====
     with st.sidebar.expander("🏢 当前公司列表"):
         companies = load_companies()
         if companies:
             st.dataframe(pd.DataFrame(companies))
             st.caption(f"共 {len(companies)} 家公司")
+            # 新增清空按钮
+            if st.button("🗑️ 清空所有公司数据", key="clear_companies"):
+                if st.checkbox("确认清空？此操作不可恢复", key="confirm_clear"):
+                    save_companies([])
+                    st.success("已清空所有公司数据")
+                    st.rerun()
         else:
             st.info("暂无数据")
     
@@ -791,12 +807,24 @@ all_provinces = sorted(set(c['province'] for c in companies if c['province']))
 col1, col2, col3 = st.columns(3)
 with col1:
     province = st.selectbox("省份", [""] + all_provinces)
-    cities = sorted(set(c['city'] for c in companies if c['province'] == province)) if province else sorted(set(c['city'] for c in companies))
+    # 根据省份过滤城市（确保城市只属于该省份）
+    if province:
+        cities = sorted(set(c['city'] for c in companies if c['province'] == province))
+    else:
+        cities = sorted(set(c['city'] for c in companies))
     city = st.selectbox("城市", [""] + cities)
 with col2:
-    districts = sorted(set(c['district'] for c in companies if c['province'] == province and c['city'] == city)) if province and city else []
+    # 进一步过滤区县
+    if province and city:
+        districts = sorted(set(c['district'] for c in companies if c['province'] == province and c['city'] == city))
+    else:
+        districts = []
     district = st.selectbox("区县", [""] + districts)
-    company_list = [c for c in companies if c['province'] == province and c['city'] == city and (not district or c['district'] == district)]
+    # 过滤公司列表
+    if province and city:
+        company_list = [c for c in companies if c['province'] == province and c['city'] == city and (not district or c['district'] == district)]
+    else:
+        company_list = []
     company_names = [c['company_name'] for c in company_list]
     selected_company_names = st.multiselect("公司（可多选）", company_names)
 with col3:
