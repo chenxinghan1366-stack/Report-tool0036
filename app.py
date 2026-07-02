@@ -543,13 +543,13 @@ def apply_custom_template_mapping(wb, data, mapping):
         if field in data:
             ws[cell_ref] = data[field]
 
-# ========== 解析Excel（增加更多sheet关键词） ==========
+# ========== 解析Excel ==========
 def parse_uploaded_excel(file):
     xls = pd.ExcelFile(file)
     sheets = xls.sheet_names
     all_companies = []
     unmapped_cities = set()
-    data_sheet_name = None  # 用于识别数据sheet
+    data_sheet_name = None
     
     # 构建城市→省份映射
     city_province_map = {}
@@ -560,7 +560,7 @@ def parse_uploaded_excel(file):
         key = normalize_name(r['city'])
         city_province_map[key] = r['province']
     
-    # 先尝试找数据sheet（用于后续数据预览）
+    # 寻找数据sheet
     for s in sheets:
         s_lower = s.lower()
         if any(keyword in s_lower for keyword in ['明细', '月度', '数据', '年检', '主数据', '月报', '季报']):
@@ -673,7 +673,6 @@ with st.sidebar:
                 if valid_companies:
                     save_companies(valid_companies)
                     st.success(f"成功提取 {len(valid_companies)} 家公司")
-                    # 读取数据sheet
                     if data_sheet:
                         try:
                             df_data = pd.read_excel(uploaded_file, sheet_name=data_sheet)
@@ -755,10 +754,11 @@ with st.sidebar:
                         new_personal_social = st.number_input("个人社保比例", value=float(rule['personal_social']), step=0.001, format="%.3f")
                         new_unit_fund = st.number_input("单位公积金比例", value=float(rule['unit_fund']), step=0.001, format="%.3f")
                         new_personal_fund = st.number_input("个人公积金比例", value=float(rule['personal_fund']), step=0.001, format="%.3f")
-                        new_social_min = st.number_input("社保基数下限", value=float(rule.get('social_min', 0)), step=100)
-                        new_social_max = st.number_input("社保基数上限", value=float(rule.get('social_max', 999999)), step=100)
-                        new_fund_min = st.number_input("公积金基数下限", value=float(rule.get('fund_min', 0)), step=100)
-                        new_fund_max = st.number_input("公积金基数上限", value=float(rule.get('fund_max', 999999)), step=100)
+                        # 修复：step 改为 100.0
+                        new_social_min = st.number_input("社保基数下限", value=float(rule.get('social_min', 0)), step=100.0)
+                        new_social_max = st.number_input("社保基数上限", value=float(rule.get('social_max', 999999)), step=100.0)
+                        new_fund_min = st.number_input("公积金基数下限", value=float(rule.get('fund_min', 0)), step=100.0)
+                        new_fund_max = st.number_input("公积金基数上限", value=float(rule.get('fund_max', 999999)), step=100.0)
                         new_source = st.text_input("来源文号", value=rule.get('source_quote', ''))
                         submitted = st.form_submit_button("保存修改")
                         if submitted:
@@ -788,10 +788,10 @@ with st.sidebar:
                     new_personal_social = st.number_input("个人社保比例", value=0.08, step=0.001, format="%.3f")
                     new_unit_fund = st.number_input("单位公积金比例", value=0.12, step=0.001, format="%.3f")
                     new_personal_fund = st.number_input("个人公积金比例", value=0.12, step=0.001, format="%.3f")
-                    new_social_min = st.number_input("社保基数下限", value=0, step=100)
-                    new_social_max = st.number_input("社保基数上限", value=999999, step=100)
-                    new_fund_min = st.number_input("公积金基数下限", value=0, step=100)
-                    new_fund_max = st.number_input("公积金基数上限", value=999999, step=100)
+                    new_social_min = st.number_input("社保基数下限", value=0, step=100.0)
+                    new_social_max = st.number_input("社保基数上限", value=999999, step=100.0)
+                    new_fund_min = st.number_input("公积金基数下限", value=0, step=100.0)
+                    new_fund_max = st.number_input("公积金基数上限", value=999999, step=100.0)
                     new_source = st.text_input("来源文号")
                     submitted = st.form_submit_button("添加")
                     if submitted and new_city:
@@ -937,7 +937,6 @@ if selected_companies and report_type:
             options[f"📄 官方模板：{c['template_name']}（{c['province']}）"] = {'type': 'official', 'data': c}
     for ct in custom_templates:
         options[f"⭐ 自定义模板：{ct['name']}"] = {'type': 'custom', 'data': ct}
-    # 通用模板 - 增加更好的描述
     options["🔄 通用模板（系统内置，适用于无官方模板场景）"] = {'type': 'general', 'data': None}
     
     if len(options) > 1:
@@ -965,7 +964,6 @@ if selected_companies and report_type:
         template_type = "自定义模板"
         match_level = "自定义模板"
     else:
-        # 通用模板 - 使用更丰富的元数据
         selected_template = {
             'id': 'gen001',
             'template_name': f'{report_type}通用申报表',
@@ -973,7 +971,7 @@ if selected_companies and report_type:
             'source_authority': 'Streamlit 智能报表系统',
             'publish_date': '内置，随系统更新',
             'required_fields': '纳税人识别号,公司名称,申报金额',
-            'source_url': '系统内置模板，无外部来源'  # 改为说明文字
+            'source_url': '系统内置模板，无外部来源'
         }
         match_level = "通用模板"
     
