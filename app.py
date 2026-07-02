@@ -623,6 +623,38 @@ def apply_custom_template_mapping(wb, data, mapping):
         if field in data:
             ws[cell_ref] = data[field]
 
+# ========== 【核心新增】自动检测表头并读取Sheet ==========
+def auto_load_sheet_with_header_detection(file, sheet_name):
+    """
+    自动检测指定Sheet的表头行（包含'城市'、'公司'等关键词的行），
+    并返回以该行为列名的DataFrame（跳过前面的无关行）
+    """
+    xls = pd.ExcelFile(file)
+    df_raw = pd.read_excel(file, sheet_name=sheet_name, header=None)
+    
+    header_row = None
+    # 逐行查找包含关键字的行
+    for i, row in df_raw.iterrows():
+        row_text = ' '.join([str(v) for v in row.values if pd.notna(v)])
+        if '所属城市' in row_text or '城市' in row_text or '分公司' in row_text or '公司' in row_text:
+            header_row = i
+            break
+    
+    if header_row is not None:
+        # 以该行作为表头，读取数据（跳过header_row前面的行）
+        df = pd.read_excel(file, sheet_name=sheet_name, skiprows=header_row)
+        # 清理列名
+        df.columns = [str(c).strip() for c in df.columns]
+        # 去除全为空的行
+        df = df.dropna(how='all')
+        return df, header_row
+    else:
+        # 如果没找到，尝试默认第一行为表头
+        df = pd.read_excel(file, sheet_name=sheet_name, header=0)
+        df.columns = [str(c).strip() for c in df.columns]
+        df = df.dropna(how='all')
+        return df, 0
+
 # ========== 解析Excel（多文件支持） ==========
 def parse_uploaded_excel(file):
     xls = pd.ExcelFile(file)
@@ -832,7 +864,7 @@ page = st.sidebar.radio("选择功能", [
     "💾 备份与恢复"
 ])
 
-# ===== 全局Sheet选择器 =====
+# ===== 全局Sheet选择器（使用自动检测） =====
 if 'uploaded_files' in st.session_state and st.session_state['uploaded_files']:
     st.sidebar.markdown("---")
     st.sidebar.subheader("📂 数据Sheet选择")
@@ -850,12 +882,13 @@ if 'uploaded_files' in st.session_state and st.session_state['uploaded_files']:
         idx = sheets.index(current_sheet) if current_sheet in sheets else 0
         selected_sheet = st.sidebar.selectbox("选择Sheet", sheets, index=idx, key="global_sheet_select")
         if selected_sheet != st.session_state.get('data_sheet_name'):
-            df = pd.read_excel(selected_file, sheet_name=selected_sheet)
+            df, header_row = auto_load_sheet_with_header_detection(selected_file, selected_sheet)
             st.session_state['imported_df'] = df
             st.session_state['data_sheet_name'] = selected_sheet
+            st.session_state['data_header_row'] = header_row
             rules = load_rules()
             st.session_state['validation_report'] = validate_data(df, rules)
-            st.sidebar.success(f"✅ 已加载: {selected_sheet}")
+            st.sidebar.success(f"✅ 已加载: {selected_sheet} (表头行: {header_row+1})")
             st.rerun()
         else:
             st.sidebar.info(f"当前: {selected_sheet}")
@@ -912,7 +945,6 @@ if page == "📊 工作台":
 elif page == "📤 数据导入":
     st.subheader("📤 数据导入（支持多文件）")
     
-    # 新增：导入模式选择
     import_mode = st.radio("导入模式", ["智能导入（自动识别结构）", "普通导入（手动选择列，开发中）"], index=0, horizontal=True)
     st.caption("智能导入将自动识别城市、公司等列；普通导入可自定义列映射（开发中，当前与智能导入相同）")
     
@@ -949,12 +981,13 @@ elif page == "📤 数据导入":
                         if not default_sheet and sheets:
                             default_sheet = sheets[0]
                         if default_sheet:
-                            df_data = pd.read_excel(first_file, sheet_name=default_sheet)
-                            st.session_state['imported_df'] = df_data
+                            df, header_row = auto_load_sheet_with_header_detection(first_file, default_sheet)
+                            st.session_state['imported_df'] = df
                             st.session_state['data_sheet_name'] = default_sheet
+                            st.session_state['data_header_row'] = header_row
                             rules = load_rules()
-                            st.session_state['validation_report'] = validate_data(df_data, rules)
-                            st.success(f"已自动加载 Sheet「{default_sheet}」，共 {len(df_data)} 行")
+                            st.session_state['validation_report'] = validate_data(df, rules)
+                            st.success(f"已自动加载 Sheet「{default_sheet}」（表头行: {header_row+1}），共 {len(df)} 行数据")
                 else:
                     st.error("未能识别任何有效公司，请确认城市列包含已配置的城市")
             else:
@@ -964,7 +997,7 @@ elif page == "📤 数据导入":
         st.subheader("📊 数据预览")
         df = st.session_state['imported_df']
         st.dataframe(df.head(10), use_container_width=True)
-        st.caption(f"当前Sheet: {st.session_state.get('data_sheet_name', '未知')}，共 {len(df)} 行")
+        st.caption(f"当前Sheet: {st.session_state.get('data_sheet_name', '未知')}，共 {len(df)} 行，表头行: {st.session_state.get('data_header_row', 0)+1}")
         
         if 'validation_report' in st.session_state:
             report = st.session_state['validation_report']
@@ -1411,7 +1444,7 @@ else:
                 'source_url': '#'
             }
         
-        # ---- 新增：依据匹配详情卡片 ----
+        # ---- 依据匹配详情 ----
         with st.expander("📋 依据匹配（来源 / 模板 / 规则）", expanded=True):
             st.markdown("**匹配结果**")
             col_a, col_b = st.columns(2)
@@ -1432,7 +1465,6 @@ else:
                 st.write(f"匹配级别：{match_level if matched else '通用模板'}")
             with col_b:
                 st.markdown("**规则**")
-                # 显示匹配到的规则
                 if selected_companies:
                     first_comp = selected_companies[0]
                     rule = get_rule_for_city(first_comp['city'])
@@ -1444,7 +1476,7 @@ else:
                         st.write("规则：未匹配，将使用默认值")
                 else:
                     st.write("规则：待选择公司后显示")
-            # 显示所有公司的规则匹配状态
+            # 规则匹配状态
             st.markdown("**所有公司规则匹配状态**")
             rule_status = []
             for comp in selected_companies:
@@ -1455,7 +1487,7 @@ else:
                     rule_status.append(f"{comp['company_name']} → {comp['city']} (⚠️ 将使用默认值)")
             st.write("\n".join(rule_status))
         
-        # ---- 保留原有的模板预览（可折叠） ----
+        # ---- 字段映射预览 ----
         with st.expander("📋 字段映射预览", expanded=False):
             fields = selected_template.get('required_fields', '').split(',')
             if fields and fields[0]:
