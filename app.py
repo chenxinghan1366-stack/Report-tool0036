@@ -623,17 +623,12 @@ def apply_custom_template_mapping(wb, data, mapping):
         if field in data:
             ws[cell_ref] = data[field]
 
-# ========== 【核心新增】自动检测表头并读取Sheet ==========
+# ========== 自动检测表头并读取Sheet ==========
 def auto_load_sheet_with_header_detection(file, sheet_name):
-    """
-    自动检测指定Sheet的表头行（包含'城市'、'公司'等关键词的行），
-    并返回以该行为列名的DataFrame（跳过前面的无关行）
-    """
     xls = pd.ExcelFile(file)
     df_raw = pd.read_excel(file, sheet_name=sheet_name, header=None)
     
     header_row = None
-    # 逐行查找包含关键字的行
     for i, row in df_raw.iterrows():
         row_text = ' '.join([str(v) for v in row.values if pd.notna(v)])
         if '所属城市' in row_text or '城市' in row_text or '分公司' in row_text or '公司' in row_text:
@@ -641,21 +636,17 @@ def auto_load_sheet_with_header_detection(file, sheet_name):
             break
     
     if header_row is not None:
-        # 以该行作为表头，读取数据（跳过header_row前面的行）
         df = pd.read_excel(file, sheet_name=sheet_name, skiprows=header_row)
-        # 清理列名
         df.columns = [str(c).strip() for c in df.columns]
-        # 去除全为空的行
         df = df.dropna(how='all')
         return df, header_row
     else:
-        # 如果没找到，尝试默认第一行为表头
         df = pd.read_excel(file, sheet_name=sheet_name, header=0)
         df.columns = [str(c).strip() for c in df.columns]
         df = df.dropna(how='all')
         return df, 0
 
-# ========== 解析Excel（多文件支持） ==========
+# ========== 解析Excel ==========
 def parse_uploaded_excel(file):
     xls = pd.ExcelFile(file)
     sheets = xls.sheet_names
@@ -738,7 +729,7 @@ def parse_multiple_files(files):
             unique.append(c)
     return unique, unmapped_cities, all_sheets
 
-# ========== 数据校验函数 ==========
+# ========== 数据校验函数（修复版） ==========
 def validate_data(df, rules):
     if df is None or df.empty:
         return {'total_rows': 0, 'error_rows': 0, 'details': {}, 'summary': {}, 'error_rows_detail': {}}
@@ -756,6 +747,15 @@ def validate_data(df, rules):
     city_rule_map = {normalize_name(r['city']): r for r in rules}
     error_rows = {}
     
+    # ----- 修复：只检测真正的数值列，排除“校验”“状态”等非数值列 -----
+    numeric_cols = []
+    for col in df.columns:
+        col_lower = col.lower()
+        if ('基数' in col_lower or '金额' in col_lower or '费用' in col_lower or '比例' in col_lower):
+            exclude_words = ['校验', '状态', '类型', '说明', '备注', '合规', '是否', '判断', '结果']
+            if not any(w in col_lower for w in exclude_words):
+                numeric_cols.append(col)
+    
     for idx, row in df.iterrows():
         row_errors = []
         city = str(row[city_col]) if pd.notna(row[city_col]) else ''
@@ -766,10 +766,6 @@ def validate_data(df, rules):
             if norm_city not in city_rule_map:
                 row_errors.append(f'城市"{city}"未在规则库中')
         
-        numeric_cols = []
-        for col in df.columns:
-            if '基数' in col or '比例' in col or '金额' in col or '费用' in col:
-                numeric_cols.append(col)
         for col in numeric_cols:
             val = row[col]
             if pd.notna(val):
@@ -864,7 +860,7 @@ page = st.sidebar.radio("选择功能", [
     "💾 备份与恢复"
 ])
 
-# ===== 全局Sheet选择器（使用自动检测） =====
+# ===== 全局Sheet选择器 =====
 if 'uploaded_files' in st.session_state and st.session_state['uploaded_files']:
     st.sidebar.markdown("---")
     st.sidebar.subheader("📂 数据Sheet选择")
@@ -1341,7 +1337,7 @@ elif page == "💾 备份与恢复":
         if path:
             st.success(f"备份成功：{os.path.basename(path)}")
 
-# ===== 底部：快速生成报表（含“依据匹配”详情） =====
+# ===== 底部：快速生成报表 =====
 st.markdown("---")
 st.subheader("🚀 快速生成报表")
 
@@ -1476,7 +1472,6 @@ else:
                         st.write("规则：未匹配，将使用默认值")
                 else:
                     st.write("规则：待选择公司后显示")
-            # 规则匹配状态
             st.markdown("**所有公司规则匹配状态**")
             rule_status = []
             for comp in selected_companies:
