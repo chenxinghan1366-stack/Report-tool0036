@@ -17,21 +17,18 @@ DB_PATH = os.path.join(os.path.dirname(__file__), "app_data.db")
 BACKUP_DIR = os.path.join(os.path.dirname(__file__), "backup")
 TEMPLATES_DIR = os.path.join(os.path.dirname(__file__), "custom_templates")
 
-# 创建必要的目录
 for d in [BACKUP_DIR, TEMPLATES_DIR]:
     if not os.path.exists(d):
         os.makedirs(d)
 
-# ========== 数据库备份函数 ==========
+# ========== 备份函数 ==========
 def backup_database():
-    """自动备份数据库"""
     if not os.path.exists(DB_PATH):
         return
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     backup_path = os.path.join(BACKUP_DIR, f"data_backup_{timestamp}.db")
     try:
         shutil.copy2(DB_PATH, backup_path)
-        # 保留最近30个备份
         backups = sorted([f for f in os.listdir(BACKUP_DIR) if f.startswith("data_backup_")])
         if len(backups) > 30:
             for f in backups[:-30]:
@@ -42,18 +39,15 @@ def backup_database():
         return None
 
 def get_backup_list():
-    """获取备份列表"""
     if not os.path.exists(BACKUP_DIR):
         return []
     return sorted([f for f in os.listdir(BACKUP_DIR) if f.startswith("data_backup_")], reverse=True)
 
 def restore_backup(backup_file):
-    """恢复备份"""
     backup_path = os.path.join(BACKUP_DIR, backup_file)
     if not os.path.exists(backup_path):
         return False
     try:
-        # 先备份当前数据库
         backup_database()
         shutil.copy2(backup_path, DB_PATH)
         return True
@@ -104,7 +98,6 @@ init_db()
 def migrate_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    # 检查并添加缺失列
     c.execute("PRAGMA table_info(rules)")
     columns_rules = [col[1] for col in c.fetchall()]
     if 'province' not in columns_rules:
@@ -135,7 +128,7 @@ def migrate_db():
 
 migrate_db()
 
-# ========== 数据操作函数 ==========
+# ========== 数据操作 ==========
 def dict_fetchall(cursor):
     columns = [col[0] for col in cursor.description]
     return [dict(zip(columns, row)) for row in cursor.fetchall()]
@@ -307,7 +300,7 @@ def save_source_registry(sources):
     conn.close()
     backup_database()
 
-# ========== 全国省份及城市规则 ==========
+# ========== 全国默认规则 ==========
 PROVINCE_DEFAULT_RULES = [
     {'city': '上海', 'province': '上海', 'unit_social': 0.16, 'personal_social': 0.08,
      'unit_fund': 0.07, 'personal_fund': 0.07, 'social_min': 7310, 'social_max': 36549,
@@ -449,7 +442,7 @@ def init_default_data():
 
 init_default_data()
 
-# ========== 标准化匹配函数 ==========
+# ========== 标准化匹配 ==========
 def normalize_name(name):
     if not name:
         return name
@@ -497,9 +490,8 @@ def match_template_with_details(province, city, district, report_type):
     candidates = [t for t in templates if normalize_name(t['province']) == norm_prov and t['report_type'] == report_type]
     return matched, match_level, candidates
 
-# ========== 自定义模板字段映射 ==========
+# ========== 自定义模板 ==========
 def get_custom_template_field_mapping(custom_template):
-    """获取自定义模板的字段映射"""
     if not custom_template:
         return {}
     try:
@@ -508,7 +500,6 @@ def get_custom_template_field_mapping(custom_template):
         return {}
 
 def apply_custom_template_mapping(wb, data, mapping):
-    """应用自定义模板字段映射"""
     if not mapping:
         return
     ws = wb.active
@@ -571,13 +562,18 @@ def parse_uploaded_excel(file):
             unique.append(c)
     return unique
 
+# ========== 【核心修复】get_rule_for_city 支持去后缀匹配 ==========
 def get_rule_for_city(city):
+    if not city:
+        return None
     rules = load_rules()
+    norm_city = normalize_name(city)
     for r in rules:
-        if r['city'] == city:
+        if normalize_name(r['city']) == norm_city:
             return r
+    # 尝试用省份匹配（直辖市）
     for r in rules:
-        if r.get('province') == city:
+        if normalize_name(r.get('province', '')) == norm_city:
             return r
     return None
 
@@ -663,16 +659,14 @@ with st.sidebar:
         else:
             st.info("暂无模板")
 
-    # ===== 新增：规则管理面板 =====
+    # ===== 规则管理面板 =====
     with st.sidebar.expander("⚙️ 规则管理（社保/公积金）"):
         st.markdown("**当前所有城市规则**")
         rules = load_rules()
         if rules:
-            # 显示规则表格（简要）
             df_rules = pd.DataFrame(rules)
             st.dataframe(df_rules[['city', 'province', 'unit_social', 'personal_social', 'unit_fund', 'personal_fund', 'source_quote']], use_container_width=True)
             
-            # 选择要编辑的城市
             cities = sorted(set(r['city'] for r in rules))
             selected_city = st.selectbox("选择城市进行编辑", [""] + cities)
             if selected_city:
@@ -691,7 +685,6 @@ with st.sidebar:
                         new_source = st.text_input("来源文号", value=rule.get('source_quote', ''))
                         submitted = st.form_submit_button("保存修改")
                         if submitted:
-                            # 更新规则
                             updated_rules = []
                             for r in rules:
                                 if r['id'] == rule['id']:
@@ -710,7 +703,6 @@ with st.sidebar:
                             save_rules(updated_rules)
                             st.success("规则已更新！")
                             st.rerun()
-            # 新增城市规则
             with st.expander("➕ 新增城市规则"):
                 with st.form(key="add_rule"):
                     new_city = st.text_input("城市名称")
@@ -745,7 +737,6 @@ with st.sidebar:
                         save_rules(rules)
                         st.success(f"已添加 {new_city} 的规则！")
                         st.rerun()
-            # 重置为默认规则
             if st.button("🔄 重置所有规则为系统默认值"):
                 if st.checkbox("确认重置？此操作将覆盖所有自定义规则"):
                     default_rules = []
@@ -811,7 +802,6 @@ with col2:
 with col3:
     report_type = st.selectbox("报表类型", ["", "增值税", "社保", "公积金", "个人所得税", "企业所得税", "年度汇算清缴"])
     
-    # ===== 自定义统计口径 =====
     period_type = st.selectbox("统计口径", ["月度（固定月份）", "累计（1-12月）", "自定义月份范围"])
     if period_type == "月度（固定月份）":
         month = st.selectbox("月份", list(range(1,13)), index=11)
@@ -821,7 +811,7 @@ with col3:
         month = None
         period_label = "累计（1-12月）"
         custom_period = "1-12月"
-    else:  # 自定义月份范围
+    else:
         st.markdown("**选择月份范围**")
         start_month = st.selectbox("起始月份", list(range(1,13)), index=0)
         end_month = st.selectbox("结束月份", list(range(1,13)), index=11)
@@ -842,21 +832,17 @@ if selected_companies and report_type:
     
     matched, match_level, candidates = match_template_with_details(province, city, district, report_type)
     
-    # ===== 自定义模板选择 =====
     custom_templates = load_custom_templates()
     template_choice = None
     
-    # 构建选项：官方模板 + 自定义模板
     options = {}
     if matched:
         options[f"✅ 官方模板：{matched['template_name']}（{match_level}）"] = {'type': 'official', 'data': matched}
     for c in candidates:
         if c['id'] != (matched['id'] if matched else ''):
             options[f"📄 官方模板：{c['template_name']}（{c['province']}）"] = {'type': 'official', 'data': c}
-    # 添加自定义模板
     for ct in custom_templates:
         options[f"⭐ 自定义模板：{ct['name']}"] = {'type': 'custom', 'data': ct}
-    # 通用模板兜底
     options["🔄 通用模板（系统内置）"] = {'type': 'general', 'data': None}
     
     if len(options) > 1:
@@ -873,7 +859,6 @@ if selected_companies and report_type:
     else:
         template_choice = list(options.values())[0]
     
-    # 处理选中的模板
     selected_template = None
     template_type = "通用"
     if template_choice['type'] == 'official':
@@ -885,7 +870,6 @@ if selected_companies and report_type:
         template_type = "自定义模板"
         match_level = "自定义模板"
     else:
-        # 通用模板
         selected_template = {
             'id': 'gen001',
             'template_name': f'{report_type}通用申报表',
@@ -897,7 +881,6 @@ if selected_companies and report_type:
         }
         match_level = "通用模板"
     
-    # 显示模板信息
     st.success(f"✅ 已选择模板：{selected_template['template_name']}（{match_level}）")
     col_a, col_b = st.columns(2)
     with col_a:
@@ -915,18 +898,15 @@ if selected_companies and report_type:
         st.write(f"报表类型：{report_type}")
         st.write(f"统计口径：{period_label}")
     
-    # ===== 自定义模板字段映射（如果是自定义模板） =====
     if template_type == "自定义模板" and selected_template:
         mapping = get_custom_template_field_mapping(selected_template)
         if mapping:
             st.info(f"📌 字段映射：{', '.join([f'{k}→{v}' for k, v in mapping.items()])}")
     
-    # ===== 模板预览 =====
     st.subheader("📋 模板预览")
     fields = selected_template.get('required_fields', '').split(',')
     if fields and fields[0]:
         st.markdown(f"**字段列表**：{', '.join(fields)}")
-        
         sample_row = {}
         sample_values = {
             '纳税人识别号': '91310115MA1KXXXXX',
@@ -955,12 +935,11 @@ if selected_companies and report_type:
         }
         for f in fields:
             sample_row[f] = sample_values.get(f, f'<{f} 示例值>')
-        
         preview_df = pd.DataFrame([{'字段名': f, '示例值': sample_row[f]} for f in fields if f])
         if not preview_df.empty:
             st.dataframe(preview_df, use_container_width=True)
     
-    # ===== 数据校验 =====
+    # ===== 数据校验（含规则匹配增强） =====
     st.subheader("📋 数据校验")
     data_source_text = "未知"
     if 'imported_df' in st.session_state and st.session_state['imported_df'] is not None:
@@ -976,32 +955,40 @@ if selected_companies and report_type:
     st.info(f"📌 数据来源：{data_source_text}")
     st.info(f"📌 统计口径：{period_label}")
     
-    # 增强：显示每个公司的规则匹配情况
+    # ---- 增强规则匹配显示 ----
     rule_status = []
-    for comp in selected_companies:
-        r = get_rule_for_city(comp['city'])
-        if r:
-            rule_status.append(f"{comp['company_name']} → {r['city']} (规则: {r.get('source_quote', '系统默认')})")
-        else:
-            rule_status.append(f"{comp['company_name']} → {comp['city']} (⚠️ 无规则，将使用默认值)")
-    st.info("📌 规则匹配情况：\n" + "\n".join(rule_status))
-    
-    missing_rules = []
     for comp in selected_companies:
         rule = get_rule_for_city(comp['city'])
         if rule is None:
-            missing_rules.append(comp['city'])
-    if missing_rules:
-        st.warning(f"⚠️ 以下城市缺少规则，将使用默认值：{', '.join(set(missing_rules))}")
+            # 从默认规则中尝试查找（兜底）
+            default_rule = next((dr for dr in PROVINCE_DEFAULT_RULES if normalize_name(dr['city']) == normalize_name(comp['city'])), None)
+            if default_rule:
+                rule_status.append(f"{comp['company_name']} → {comp['city']} (将使用默认规则：{default_rule['source_quote']})")
+            else:
+                rule_status.append(f"{comp['company_name']} → {comp['city']} (⚠️ 无任何规则，使用通用默认值)")
+        else:
+            rule_status.append(f"{comp['company_name']} → {comp['city']} (规则: {rule.get('source_quote', '系统默认')})")
+    st.info("📌 规则匹配情况：\n" + "\n".join(rule_status))
+    
+    # 不再单独显示缺失警告，因为上面已经详细列出
+    missing = [comp['city'] for comp in selected_companies if get_rule_for_city(comp['city']) is None]
+    if missing:
+        # 但如果有完全未匹配的，额外提示
+        st.info(f"ℹ️ 部分城市({', '.join(set(missing))})未在规则库中，将使用系统默认或通用值。")
     else:
-        st.success("✅ 所有城市已配置规则")
+        st.success("✅ 所有城市已匹配到规则")
     
     # ===== 报表预览 =====
     st.subheader("📊 报表预览（生成前确认）")
     preview_data = []
     for comp in selected_companies:
         rule = get_rule_for_city(comp['city'])
-        rule_source = rule.get('source_quote', '未配置') if rule else '未配置'
+        if rule is None:
+            # 尝试找默认规则
+            default_rule = next((dr for dr in PROVINCE_DEFAULT_RULES if normalize_name(dr['city']) == normalize_name(comp['city'])), None)
+            rule_source = default_rule['source_quote'] if default_rule else '通用默认'
+        else:
+            rule_source = rule.get('source_quote', '未配置')
         preview_data.append({
             '公司': comp['company_name'],
             '城市': comp['city'],
@@ -1024,15 +1011,10 @@ if selected_companies and report_type:
             
             for comp in selected_companies:
                 try:
-                    # ===== 获取规则（增强处理） =====
+                    # 获取规则（含兜底）
                     rule = get_rule_for_city(comp['city'])
                     if rule is None:
-                        # 尝试从默认规则中查找（如果因某种原因未加载到数据库）
-                        default_rule = None
-                        for dr in PROVINCE_DEFAULT_RULES:
-                            if dr['city'] == comp['city']:
-                                default_rule = dr
-                                break
+                        default_rule = next((dr for dr in PROVINCE_DEFAULT_RULES if normalize_name(dr['city']) == normalize_name(comp['city'])), None)
                         if default_rule:
                             st.warning(f"⚠️ 城市 {comp['city']} 未在规则库中找到，将使用系统默认规则（{default_rule['source_quote']}）")
                             rule = {
@@ -1047,7 +1029,6 @@ if selected_companies and report_type:
                                 'source_quote': default_rule.get('source_quote', '系统默认')
                             }
                         else:
-                            # 完全未找到，使用硬编码默认值
                             st.warning(f"⚠️ 城市 {comp['city']} 没有任何规则，将使用通用默认值（16%/8%）")
                             rule = {
                                 'unit_social': 0.16,
@@ -1118,14 +1099,12 @@ if selected_companies and report_type:
                         }
                         row_data = [sample_data.get(f, '') for f in fields]
                     
-                    # 创建Excel
                     wb = Workbook()
                     ws = wb.active
                     ws.title = "申报表"
                     ws.append(fields)
                     ws.append(row_data)
                     
-                    # 水印
                     ws.insert_rows(1)
                     ws['A1'] = f'【系统生成 - 待复核版】统计口径：{period_label}'
                     ws['A1'].font = Font(color='FF0000', bold=True, size=14)
@@ -1148,7 +1127,6 @@ if selected_companies and report_type:
                     ws['A4'].font = Font(color='666666', size=10)
                     ws.merge_cells(start_row=4, start_column=1, end_row=4, end_column=len(fields) if fields else 1)
                     
-                    # 年检汇总
                     ws_annual = wb.create_sheet("年检汇总")
                     ws_annual.append(['年检汇总数据'])
                     ws_annual.merge_cells('A1:B1')
@@ -1222,7 +1200,6 @@ if selected_companies and report_type:
                     ws_annual.append(['数据来源', data_source_text])
                     ws_annual.append(['规则来源', rule.get('source_quote', '未配置')])
                     
-                    # 审计日志
                     audit = wb.create_sheet("审计日志")
                     audit.append(['操作时间', '操作类型', '操作人', '详情'])
                     audit.append([datetime.now().isoformat(), 'GENERATED', '系统', f'公司:{comp["company_name"]}, 城市:{comp["city"]}, 模板:{selected_template["template_name"]}, 匹配级别:{match_level}, 数据来源:{data_source_text}, 统计口径:{period_label}, 规则:{rule.get("source_quote", "未配置")}'])
@@ -1290,8 +1267,6 @@ else:
 # ===== 自定义模板管理 =====
 with st.expander("📄 自定义模板管理（上传自己的模板）"):
     st.markdown("上传您自己的Excel模板，并映射字段到系统数据")
-    
-    # 查看已有自定义模板
     custom_templates = load_custom_templates()
     if custom_templates:
         st.write("**已保存的自定义模板**")
@@ -1316,11 +1291,9 @@ with st.expander("📄 自定义模板管理（上传自己的模板）"):
             template_name = st.text_input("模板名称", value=uploaded_template.name.replace('.xlsx', ''))
             sheet_name = st.text_input("Sheet名称（留空使用第一个Sheet）", value="")
             
-            # 读取模板预览
             wb = load_workbook(BytesIO(uploaded_template.getvalue()))
             ws = wb.active if not sheet_name else wb[sheet_name] if sheet_name in wb.sheetnames else wb.active
             
-            # 获取表头
             headers = []
             for cell in ws[1]:
                 if cell.value:
@@ -1328,7 +1301,6 @@ with st.expander("📄 自定义模板管理（上传自己的模板）"):
             
             st.write(f"**检测到表头字段**：{', '.join(headers) if headers else '未检测到表头'}")
             
-            # 字段映射
             st.markdown("**字段映射（将数据字段映射到模板列）**")
             mapping = {}
             if headers:
