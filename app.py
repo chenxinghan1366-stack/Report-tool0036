@@ -22,6 +22,13 @@ for d in [BACKUP_DIR, TEMPLATES_DIR]:
     if not os.path.exists(d):
         os.makedirs(d)
 
+# ========== PDF导出依赖 ==========
+try:
+    import pdfkit
+    PDF_AVAILABLE = True
+except ImportError:
+    PDF_AVAILABLE = False
+
 # ========== 备份函数 ==========
 def backup_database():
     if not os.path.exists(DB_PATH):
@@ -528,6 +535,32 @@ def match_template_with_details(province, city, district, report_type):
     candidates = [t for t in templates if normalize_name(t['province']) == norm_prov and t['report_type'] == report_type]
     return matched, match_level, candidates
 
+# ========== 优化二：模板推荐功能 ==========
+def recommend_template(province, city, report_type, templates):
+    """根据省份、城市和报表类型推荐最佳模板"""
+    if not templates:
+        return None, "无可用模板"
+    norm_prov = normalize_name(province)
+    norm_city = normalize_name(city)
+    
+    # 1. 精确匹配：省份+城市+报表类型
+    for t in templates:
+        if normalize_name(t['province']) == norm_prov and normalize_name(t['city']) == norm_city and t['report_type'] == report_type:
+            return t, f"✅ 精确匹配：{province} {city} {report_type}"
+    
+    # 2. 城市级匹配：只匹配城市（忽略省份）
+    for t in templates:
+        if normalize_name(t['city']) == norm_city and t['report_type'] == report_type:
+            return t, f"📌 城市级匹配：{city}（跨省通用）"
+    
+    # 3. 省级匹配：只匹配省份
+    for t in templates:
+        if normalize_name(t['province']) == norm_prov and t['report_type'] == report_type:
+            return t, f"📌 省级匹配：{province}（省级通用）"
+    
+    # 4. 全局通用
+    return None, "💡 无精确匹配，建议使用通用模板"
+
 def get_custom_template_field_mapping(custom_template):
     if not custom_template:
         return {}
@@ -573,8 +606,7 @@ def is_valid_city_name(text):
         return False
     return len(re.findall(r'[\u4e00-\u9fa5]', text)) >= 2
 
-# ========== 优化一：列名智能匹配 ==========
-# 列名同义词库
+# ========== 列名智能匹配 ==========
 CITY_KEYWORDS = ['城市', '所属城市', '城市名称', '地区', '所属地区', 'city', '地区名', '城市名']
 COMPANY_KEYWORDS = ['公司', '分公司', '公司名称', '企业名称', '单位名称', 'company', '单位', '企业']
 DISTRICT_KEYWORDS = ['区县', '区', '县', '城区', 'district', '区域']
@@ -593,6 +625,30 @@ def detect_columns(df):
         elif any(kw in col_lower for kw in DISTRICT_KEYWORDS):
             district_col = col
     return city_col, company_col, district_col
+
+# ========== 优化一：异常高亮函数 ==========
+def highlight_error_rows(df, error_rows):
+    """
+    返回DataFrame的style，将error_rows中的行标红。
+    error_rows: dict {行号: [错误列表]} 或 list 行号
+    """
+    if not error_rows:
+        return df.style
+    
+    # 如果传入的是列表，转为dict
+    if isinstance(error_rows, list):
+        error_rows = {row: ["异常"] for row in error_rows}
+    
+    def row_style(row):
+        idx = row.name + 1
+        if idx in error_rows:
+            errors = error_rows[idx]
+            err_text = "; ".join(errors) if isinstance(errors, list) else str(errors)
+            return ['background-color: #ffcccc; color: #990000'] * len(row)
+        else:
+            return [''] * len(row)
+    
+    return df.style.apply(row_style, axis=1)
 
 def parse_uploaded_excel(file):
     xls = pd.ExcelFile(file)
@@ -621,14 +677,11 @@ def parse_uploaded_excel(file):
             if header_row is not None:
                 df = pd.read_excel(file, sheet_name=sheet, skiprows=header_row)
                 df.columns = [str(c).strip() for c in df.columns]
-                # 【优化】使用智能列名匹配
                 city_col, company_col, district_col = detect_columns(df)
-                # 如果仍未匹配，让用户手动选择（在数据导入页面会显示）
                 if city_col is None or company_col is None:
                     st.session_state['column_mapping_needed'] = True
                     st.session_state['df_columns'] = list(df.columns)
                     st.warning(f"Sheet「{sheet}」未能自动识别列，请在下方选择映射")
-                    # 这里用st.selectbox让用户选择
                     all_cols = list(df.columns)
                     city_col = st.selectbox(f"请选择「{sheet}」的城市列", [""] + all_cols, key=f"city_col_{sheet}")
                     company_col = st.selectbox(f"请选择「{sheet}」的公司列", [""] + all_cols, key=f"company_col_{sheet}")
@@ -758,18 +811,15 @@ def validate_data(df, rules):
         'error_rows_detail': error_rows
     }
 
-# ========== 优化二：规则自动推断 + 批量补全 ==========
+# ========== 规则自动推断 ==========
 def auto_create_rule_for_city(city, province=None):
-    """为城市自动创建规则（从同省份复制）"""
     if not city:
         return None
     rules = load_rules()
     norm_city = normalize_name(city)
-    # 检查是否已存在
     for r in rules:
         if normalize_name(r['city']) == norm_city:
             return r
-    # 如果有省份，查找同省份规则
     if province:
         norm_prov = normalize_name(province)
         for r in rules:
@@ -783,7 +833,6 @@ def auto_create_rule_for_city(city, province=None):
                 rules.append(new_rule)
                 save_rules(rules)
                 return new_rule
-    # 全局默认
     fallback = {
         'id': str(uuid.uuid4())[:8],
         'city': city,
@@ -819,11 +868,9 @@ def get_rule_for_city(city, province=None):
     for r in rules:
         if normalize_name(r['city']) == norm_city:
             return r
-    # 自动创建规则（优化二）
     return auto_create_rule_for_city(city, province)
 
 def batch_create_missing_rules():
-    """从已导入的公司数据批量补全缺失的规则"""
     companies = load_companies()
     if not companies:
         return 0, "请先导入公司数据"
@@ -872,6 +919,54 @@ def get_verification_progress(batch_id):
     ]
     completed = sum(1 for item in items if item['done'])
     return {'total': len(items), 'completed': completed, 'items': items}
+
+# ========== PDF导出辅助 ==========
+def df_to_html_table(df):
+    """将DataFrame转换为HTML表格（用于PDF导出）"""
+    if df is None or df.empty:
+        return "<p>无数据</p>"
+    html = "<table border='1' style='border-collapse:collapse;font-family:SimSun,serif;'>"
+    # 表头
+    html += "<thead><tr>"
+    for col in df.columns:
+        html += f"<th style='background:#4472C4;color:white;padding:8px;'>{col}</th>"
+    html += "</tr></thead><tbody>"
+    # 数据行
+    for _, row in df.iterrows():
+        html += "<tr>"
+        for val in row:
+            html += f"<td style='padding:6px;'>{val}</td>"
+        html += "</tr>"
+    html += "</tbody></table>"
+    return html
+
+def create_pdf_from_html(html_content, title="报表"):
+    """生成包含HTML内容的PDF（需要安装pdfkit和wkhtmltopdf）"""
+    full_html = f"""
+    <html>
+    <head><meta charset="UTF-8"><title>{title}</title></head>
+    <body style='font-family: SimSun, serif; padding: 20px;'>
+        <h2 style='text-align:center;'>{title}</h2>
+        <p style='text-align:center;color:#666;'>生成时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+        <hr/>
+        {html_content}
+        <hr/>
+        <p style='text-align:center;color:#999;font-size:12px;'>由智能报表系统生成</p>
+    </body>
+    </html>
+    """
+    return full_html
+
+def export_to_pdf(html_content, output_path):
+    """将HTML内容导出为PDF（使用pdfkit）"""
+    if not PDF_AVAILABLE:
+        raise ImportError("pdfkit未安装，请运行: pip install pdfkit")
+    # 尝试生成PDF
+    try:
+        pdfkit.from_string(html_content, output_path)
+        return True
+    except Exception as e:
+        raise Exception(f"PDF生成失败，请确保已安装wkhtmltopdf: {e}")
 
 # ========== Streamlit 页面 ==========
 st.set_page_config(page_title="智能报表系统 - 企业版", layout="wide")
@@ -1038,10 +1133,21 @@ elif page == "📤 数据导入":
             st.rerun()
     else:
         st.info("请上传文件以查看数据识别结果")
+    
     if 'imported_df' in st.session_state and st.session_state['imported_df'] is not None:
         st.subheader("📊 数据预览")
         df = st.session_state['imported_df']
-        st.dataframe(df.head(10), use_container_width=True)
+        
+        # 【优化一】异常高亮
+        if 'validation_report' in st.session_state:
+            report = st.session_state['validation_report']
+            error_rows = report.get('details', {})
+            styled_df = highlight_error_rows(df.head(10), error_rows)
+            st.dataframe(styled_df, use_container_width=True)
+            st.caption("🔴 红色行表示存在数据异常")
+        else:
+            st.dataframe(df.head(10), use_container_width=True)
+        
         st.caption(f"当前Sheet: {st.session_state.get('data_sheet_name', '未知')}，共 {len(df)} 行")
         if 'validation_report' in st.session_state:
             report = st.session_state['validation_report']
@@ -1223,7 +1329,6 @@ elif page == "⚙️ 规则管理":
         df_rules = pd.DataFrame(rules)
         st.dataframe(df_rules[['city', 'province', 'unit_social', 'personal_social', 'unit_fund', 'personal_fund', 'social_min', 'social_max', 'source_quote', 'rule_version', 'source_url', 'source_title']], use_container_width=True)
         
-        # 【优化二】批量补全按钮
         col_btn1, col_btn2 = st.columns(2)
         with col_btn1:
             if st.button("🔧 从公司数据批量补全规则"):
@@ -1700,7 +1805,7 @@ elif page == "📋 年审数据处理":
         with col3:
             st.metric("本期实缴金额", f"{results.get('total_amount', 0):,.0f}")
 
-# ===== 底部：快速生成报表（含进度条优化） =====
+# ===== 底部：快速生成报表 =====
 st.markdown("---")
 st.subheader("🚀 快速生成报表")
 
@@ -1759,6 +1864,15 @@ else:
     if selected_companies and report_type:
         matched, match_level, candidates = match_template_with_details(province, city, district, report_type)
         custom_templates = load_custom_templates()
+        
+        # ===== 优化二：模板推荐 =====
+        all_templates = load_templates()
+        recommended, reason = recommend_template(province, city, report_type, all_templates)
+        if recommended:
+            st.info(f"💡 推荐模板：**{recommended['template_name']}**（{reason}）")
+        else:
+            st.info(f"💡 {reason}，请从下方选择")
+        
         options = {}
         if matched:
             options[f"✅ 官方模板：{matched['template_name']}（{match_level}）"] = {'type': 'official', 'data': matched}
@@ -1771,10 +1885,17 @@ else:
         if options:
             default_idx = 0
             keys = list(options.keys())
-            if matched:
+            if recommended:
+                # 如果有推荐，把推荐模板放在第一位
+                for i, k in enumerate(keys):
+                    if recommended['template_name'] in k:
+                        default_idx = i
+                        break
+            elif matched:
                 for i, k in enumerate(keys):
                     if "✅" in k:
-                        default_idx = i; break
+                        default_idx = i
+                        break
             selected_key = st.selectbox("选择模板", keys, index=default_idx, key="template_choice")
             template_choice = options[selected_key]
         else:
@@ -1890,7 +2011,6 @@ else:
                 job_details = []
                 data_source_text = st.session_state.get('data_sheet_name', '未知')
                 
-                # 【优化三】进度条
                 progress_bar = st.progress(0)
                 status_text = st.empty()
                 total = len(selected_companies)
@@ -2104,6 +2224,29 @@ else:
                 if generated_files:
                     st.success(f"✅ 成功生成 {len(generated_files)} 份报表（批次ID：{batch_id}，状态：已完成）")
                     st.dataframe(pd.DataFrame(summary), use_container_width=True)
+                    
+                    # ===== 优化三：PDF导出 =====
+                    if PDF_AVAILABLE:
+                        try:
+                            # 生成第一个报表的PDF预览
+                            df_summary = pd.DataFrame(summary)
+                            html_content = df_to_html_table(df_summary)
+                            full_html = create_pdf_from_html(html_content, f"报表_{datetime.now().strftime('%Y%m%d')}")
+                            pdf_buffer = BytesIO()
+                            pdfkit.from_string(full_html, pdf_buffer)
+                            pdf_buffer.seek(0)
+                            st.download_button(
+                                "📄 下载报表摘要（PDF）",
+                                data=pdf_buffer,
+                                file_name=f"报表摘要_{datetime.now().strftime('%Y%m%d')}.pdf",
+                                mime="application/pdf"
+                            )
+                        except Exception as e:
+                            st.warning(f"PDF导出失败（请确保已安装wkhtmltopdf）：{e}")
+                    else:
+                        st.warning("💡 PDF导出需要安装 pdfkit 和 wkhtmltopdf，运行: pip install pdfkit，并从 https://wkhtmltopdf.org/ 下载安装 wkhtmltopdf")
+                    
+                    # 下载Excel/ZIP
                     if len(generated_files) > 1:
                         zip_buffer = BytesIO()
                         with zipfile.ZipFile(zip_buffer, 'w') as zf:
