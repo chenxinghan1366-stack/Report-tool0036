@@ -12,13 +12,19 @@ import shutil
 import json
 import hashlib
 import re
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.base import MIMEBase
+from email import encoders
+from email.mime.text import MIMEText
 
 # ========== 配置 ==========
 DB_PATH = os.path.join(os.path.dirname(__file__), "app_data.db")
 BACKUP_DIR = os.path.join(os.path.dirname(__file__), "backup")
 TEMPLATES_DIR = os.path.join(os.path.dirname(__file__), "custom_templates")
+ATTACHMENTS_DIR = os.path.join(os.path.dirname(__file__), "attachments")
 
-for d in [BACKUP_DIR, TEMPLATES_DIR]:
+for d in [BACKUP_DIR, TEMPLATES_DIR, ATTACHMENTS_DIR]:
     if not os.path.exists(d):
         os.makedirs(d)
 
@@ -67,7 +73,7 @@ def init_db():
         id TEXT PRIMARY KEY, province TEXT, city TEXT, district TEXT, report_type TEXT,
         template_name TEXT, template_version TEXT, source_url TEXT, source_authority TEXT,
         publish_date TEXT, required_fields TEXT, status TEXT, file_hash TEXT, file_type TEXT,
-        is_custom BOOLEAN DEFAULT 0, field_mapping_source TEXT
+        is_custom BOOLEAN DEFAULT 0, field_mapping_source TEXT, use_count INTEGER DEFAULT 0
     )''')
     c.execute('''CREATE TABLE IF NOT EXISTS custom_templates (
         id TEXT PRIMARY KEY, name TEXT, file_data BLOB, field_mapping TEXT,
@@ -79,7 +85,8 @@ def init_db():
         fund_min REAL, fund_max REAL, source_quote TEXT, is_default BOOLEAN DEFAULT 0,
         rule_version TEXT, effective_date TEXT,
         source_url TEXT, source_title TEXT, source_publish_date TEXT,
-        collected_at TEXT, applicable_region TEXT, official_channel TEXT, notes TEXT
+        collected_at TEXT, applicable_region TEXT, official_channel TEXT, notes TEXT,
+        use_count INTEGER DEFAULT 0
     )''')
     c.execute('''CREATE TABLE IF NOT EXISTS export_history (
         id TEXT PRIMARY KEY, company_id TEXT, template_id TEXT, company_name TEXT,
@@ -123,6 +130,37 @@ def init_db():
         id TEXT PRIMARY KEY, user_name TEXT, action_type TEXT,
         target_type TEXT, target_id TEXT, details TEXT, ip_address TEXT, created_at TEXT
     )''')
+    # ===== 新增：列映射记忆表 =====
+    c.execute('''CREATE TABLE IF NOT EXISTS column_mappings (
+        id TEXT PRIMARY KEY,
+        user_id TEXT,
+        sheet_name TEXT,
+        city_col TEXT,
+        company_col TEXT,
+        district_col TEXT,
+        created_at TEXT,
+        updated_at TEXT
+    )''')
+    # ===== 新增：数据版本表 =====
+    c.execute('''CREATE TABLE IF NOT EXISTS data_versions (
+        id TEXT PRIMARY KEY,
+        version_number INTEGER,
+        created_at TEXT,
+        record_count INTEGER,
+        file_name TEXT,
+        file_data BLOB,
+        notes TEXT
+    )''')
+    # ===== 新增：邮件配置表 =====
+    c.execute('''CREATE TABLE IF NOT EXISTS email_config (
+        id TEXT PRIMARY KEY,
+        smtp_server TEXT,
+        smtp_port INTEGER,
+        sender_email TEXT,
+        sender_password TEXT,
+        recipient_email TEXT,
+        updated_at TEXT
+    )''')
     conn.commit()
     conn.close()
 
@@ -132,12 +170,22 @@ init_db()
 def migrate_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
+    # 检查现有表结构
     c.execute("PRAGMA table_info(rules)")
     existing_cols = [col[1] for col in c.fetchall()]
-    new_cols = ['source_url', 'source_title', 'source_publish_date', 'collected_at', 'applicable_region', 'official_channel', 'notes']
+    new_cols = ['source_url', 'source_title', 'source_publish_date', 'collected_at', 'applicable_region', 'official_channel', 'notes', 'use_count']
     for col in new_cols:
         if col not in existing_cols:
-            c.execute(f"ALTER TABLE rules ADD COLUMN {col} TEXT")
+            if col == 'use_count':
+                c.execute(f"ALTER TABLE rules ADD COLUMN {col} INTEGER DEFAULT 0")
+            else:
+                c.execute(f"ALTER TABLE rules ADD COLUMN {col} TEXT")
+    
+    c.execute("PRAGMA table_info(templates)")
+    temp_cols = [col[1] for col in c.fetchall()]
+    if 'use_count' not in temp_cols:
+        c.execute("ALTER TABLE templates ADD COLUMN use_count INTEGER DEFAULT 0")
+    
     tables_to_check = [
         ('templates', ['field_mapping_source']),
         ('export_history', ['batch_id', 'job_name', 'field_mapping']),
@@ -149,6 +197,7 @@ def migrate_db():
         for col in cols:
             if col not in existing:
                 c.execute(f"ALTER TABLE {table} ADD COLUMN {col} TEXT")
+    
     c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='job_batches'")
     if not c.fetchone():
         c.execute('''CREATE TABLE job_batches (
@@ -190,6 +239,25 @@ def migrate_db():
             id TEXT PRIMARY KEY, user_name TEXT, action_type TEXT,
             target_type TEXT, target_id TEXT, details TEXT, ip_address TEXT, created_at TEXT
         )''')
+    c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='column_mappings'")
+    if not c.fetchone():
+        c.execute('''CREATE TABLE column_mappings (
+            id TEXT PRIMARY KEY, user_id TEXT, sheet_name TEXT,
+            city_col TEXT, company_col TEXT, district_col TEXT,
+            created_at TEXT, updated_at TEXT
+        )''')
+    c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='data_versions'")
+    if not c.fetchone():
+        c.execute('''CREATE TABLE data_versions (
+            id TEXT PRIMARY KEY, version_number INTEGER, created_at TEXT,
+            record_count INTEGER, file_name TEXT, file_data BLOB, notes TEXT
+        )''')
+    c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='email_config'")
+    if not c.fetchone():
+        c.execute('''CREATE TABLE email_config (
+            id TEXT PRIMARY KEY, smtp_server TEXT, smtp_port INTEGER,
+            sender_email TEXT, sender_password TEXT, recipient_email TEXT, updated_at TEXT
+        )''')
     conn.commit()
     conn.close()
 
@@ -221,7 +289,7 @@ def load_companies():
     return safe_execute_query("SELECT * FROM companies")
 
 def load_templates():
-    return safe_execute_query("SELECT * FROM templates WHERE status='active'")
+    return safe_execute_query("SELECT * FROM templates WHERE status='active' ORDER BY use_count DESC")
 
 def load_custom_templates():
     return safe_execute_query("SELECT * FROM custom_templates")
@@ -257,6 +325,96 @@ def load_template_history(template_id=None):
 
 def load_audit_log(limit=100):
     return safe_execute_query("SELECT * FROM audit_log ORDER BY created_at DESC LIMIT ?", (limit,))
+
+def load_column_mappings(user_id="default"):
+    rows = safe_execute_query("SELECT * FROM column_mappings WHERE user_id=?", (user_id,))
+    return rows[0] if rows else None
+
+def save_column_mapping(user_id, sheet_name, city_col, company_col, district_col):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    existing = c.execute("SELECT id FROM column_mappings WHERE user_id=?", (user_id,)).fetchone()
+    if existing:
+        c.execute('''UPDATE column_mappings 
+            SET sheet_name=?, city_col=?, company_col=?, district_col=?, updated_at=?
+            WHERE user_id=?''',
+            (sheet_name, city_col, company_col, district_col, datetime.now().isoformat(), user_id))
+    else:
+        c.execute('''INSERT INTO column_mappings 
+            (id, user_id, sheet_name, city_col, company_col, district_col, created_at, updated_at)
+            VALUES (?,?,?,?,?,?,?,?)''',
+            (str(uuid.uuid4())[:8], user_id, sheet_name, city_col, company_col, district_col,
+             datetime.now().isoformat(), datetime.now().isoformat()))
+    conn.commit()
+    conn.close()
+    backup_database()
+
+def load_data_versions(limit=10):
+    return safe_execute_query("SELECT * FROM data_versions ORDER BY version_number DESC LIMIT ?", (limit,))
+
+def save_data_version(record_count, file_name, file_data, notes=""):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    # 获取当前最大版本号
+    max_ver = c.execute("SELECT MAX(version_number) FROM data_versions").fetchone()[0]
+    new_ver = (max_ver or 0) + 1
+    c.execute('''INSERT INTO data_versions 
+        (id, version_number, created_at, record_count, file_name, file_data, notes)
+        VALUES (?,?,?,?,?,?,?)''',
+        (str(uuid.uuid4())[:8], new_ver, datetime.now().isoformat(), 
+         record_count, file_name, file_data, notes))
+    conn.commit()
+    conn.close()
+    backup_database()
+
+def load_email_config():
+    rows = safe_execute_query("SELECT * FROM email_config LIMIT 1")
+    return rows[0] if rows else None
+
+def save_email_config(config):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    existing = c.execute("SELECT id FROM email_config LIMIT 1").fetchone()
+    if existing:
+        c.execute('''UPDATE email_config 
+            SET smtp_server=?, smtp_port=?, sender_email=?, sender_password=?, recipient_email=?, updated_at=?
+            WHERE id=?''',
+            (config['smtp_server'], config['smtp_port'], config['sender_email'],
+             config['sender_password'], config['recipient_email'], datetime.now().isoformat(), existing[0]))
+    else:
+        c.execute('''INSERT INTO email_config 
+            (id, smtp_server, smtp_port, sender_email, sender_password, recipient_email, updated_at)
+            VALUES (?,?,?,?,?,?,?)''',
+            (str(uuid.uuid4())[:8], config['smtp_server'], config['smtp_port'],
+             config['sender_email'], config['sender_password'], config['recipient_email'],
+             datetime.now().isoformat()))
+    conn.commit()
+    conn.close()
+    backup_database()
+
+def send_email_with_attachment(recipient, subject, body, attachment_data, filename):
+    config = load_email_config()
+    if not config:
+        return False, "请先配置邮件设置"
+    try:
+        msg = MIMEMultipart()
+        msg['From'] = config['sender_email']
+        msg['To'] = recipient or config['recipient_email']
+        msg['Subject'] = subject
+        msg.attach(MIMEText(body, 'plain'))
+        part = MIMEBase('application', 'octet-stream')
+        part.set_payload(attachment_data)
+        encoders.encode_base64(part)
+        part.add_header('Content-Disposition', f'attachment; filename="{filename}"')
+        msg.attach(part)
+        server = smtplib.SMTP(config['smtp_server'], config['smtp_port'])
+        server.starttls()
+        server.login(config['sender_email'], config['sender_password'])
+        server.send_message(msg)
+        server.quit()
+        return True, "邮件发送成功"
+    except Exception as e:
+        return False, f"邮件发送失败: {str(e)}"
 
 def log_audit(user_name, action_type, target_type, target_id, details, ip_address=""):
     conn = sqlite3.connect(DB_PATH)
@@ -397,19 +555,19 @@ def save_template(template):
     if existing:
         c.execute('''UPDATE templates SET 
             template_name=?, template_version=?, source_authority=?, publish_date=?,
-            required_fields=?, status=?, file_type=?, is_custom=?, field_mapping_source=?
+            required_fields=?, status=?, file_type=?, is_custom=?, field_mapping_source=?, use_count=?
             WHERE id=?''',
             (template['template_name'], template.get('template_version','v1.0'),
              template.get('source_authority',''), template.get('publish_date',''),
              template.get('required_fields',''), template.get('status','active'),
              template.get('file_type',''), template.get('is_custom',0),
-             template.get('field_mapping_source',''), existing[0]))
+             template.get('field_mapping_source',''), template.get('use_count',0), existing[0]))
     else:
         c.execute('''INSERT INTO templates 
             (id, province, city, district, report_type, template_name, template_version,
              source_url, source_authority, publish_date, required_fields, status, 
-             file_hash, file_type, is_custom, field_mapping_source)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+             file_hash, file_type, is_custom, field_mapping_source, use_count)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
             (template['id'], template.get('province',''), template.get('city',''),
              template.get('district',''), template.get('report_type',''),
              template['template_name'], template.get('template_version','v1.0'),
@@ -417,7 +575,23 @@ def save_template(template):
              template.get('publish_date',''), template.get('required_fields',''),
              template.get('status','active'), template.get('file_hash',''),
              template.get('file_type',''), template.get('is_custom',0),
-             template.get('field_mapping_source','')))
+             template.get('field_mapping_source',''), template.get('use_count',0)))
+    conn.commit()
+    conn.close()
+    backup_database()
+
+def increment_template_use(template_id):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("UPDATE templates SET use_count = use_count + 1 WHERE id=?", (template_id,))
+    conn.commit()
+    conn.close()
+    backup_database()
+
+def increment_rule_use(rule_id):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("UPDATE rules SET use_count = use_count + 1 WHERE id=?", (rule_id,))
     conn.commit()
     conn.close()
     backup_database()
@@ -453,15 +627,15 @@ def save_rules(rules):
             (id, city, province, unit_social, personal_social, unit_fund, personal_fund,
              social_min, social_max, fund_min, fund_max, source_quote, is_default,
              rule_version, effective_date, source_url, source_title, source_publish_date,
-             collected_at, applicable_region, official_channel, notes)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+             collected_at, applicable_region, official_channel, notes, use_count)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
             (r['id'], r['city'], r.get('province',''), r['unit_social'], r['personal_social'],
              r['unit_fund'], r['personal_fund'], r.get('social_min',0), r.get('social_max',999999),
              r.get('fund_min',0), r.get('fund_max',999999), r.get('source_quote',''),
              r.get('is_default',0), r.get('rule_version','v1.0'), r.get('effective_date',''),
              r.get('source_url',''), r.get('source_title',''), r.get('source_publish_date',''),
              r.get('collected_at', datetime.now().isoformat()), r.get('applicable_region',''),
-             r.get('official_channel',''), r.get('notes','')))
+             r.get('official_channel',''), r.get('notes',''), r.get('use_count',0)))
     conn.commit()
     conn.close()
     backup_database()
@@ -545,7 +719,7 @@ def update_batch_status(batch_id, status, review_status=None):
     conn.close()
     backup_database()
 
-# ========== 【修复】normalize_name 提前定义 ==========
+# ========== normalize_name 提前定义 ==========
 def normalize_name(name):
     if not name:
         return name
@@ -554,9 +728,115 @@ def normalize_name(name):
             name = name[:-len(suffix)]
     return name.strip()
 
-# ========== 【核心】完整默认规则库（含所有地级市） ==========
+# ========== 【优化1】模板库预置 ==========
+PRESET_TEMPLATES = [
+    {
+        'id': 'tpl_vat_general',
+        'province': '全国',
+        'city': '全国',
+        'district': '',
+        'report_type': '增值税',
+        'template_name': '增值税一般纳税人申报表',
+        'template_version': '2024.1',
+        'source_url': 'https://www.chinatax.gov.cn/',
+        'source_authority': '国家税务总局',
+        'publish_date': '2024-01-01',
+        'required_fields': '纳税人识别号,公司名称,销售额,进项税额,应纳税额',
+        'status': 'active',
+        'file_hash': 'preset_vat',
+        'file_type': 'preset',
+        'is_custom': 0,
+        'field_mapping_source': '自动映射'
+    },
+    {
+        'id': 'tpl_social_general',
+        'province': '全国',
+        'city': '全国',
+        'district': '',
+        'report_type': '社保',
+        'template_name': '社会保险费申报表',
+        'template_version': '2024.1',
+        'source_url': 'https://www.mohrss.gov.cn/',
+        'source_authority': '人力资源和社会保障部',
+        'publish_date': '2024-01-01',
+        'required_fields': '单位名称,社保登记号,基数,单位金额,个人金额',
+        'status': 'active',
+        'file_hash': 'preset_social',
+        'file_type': 'preset',
+        'is_custom': 0,
+        'field_mapping_source': '自动映射'
+    },
+    {
+        'id': 'tpl_fund_general',
+        'province': '全国',
+        'city': '全国',
+        'district': '',
+        'report_type': '公积金',
+        'template_name': '住房公积金汇缴申报表',
+        'template_version': '2024.1',
+        'source_url': 'https://www.mohrss.gov.cn/',
+        'source_authority': '住房和城乡建设部',
+        'publish_date': '2024-01-01',
+        'required_fields': '单位名称,公积金账号,基数,单位比例,个人比例,单位金额,个人金额',
+        'status': 'active',
+        'file_hash': 'preset_fund',
+        'file_type': 'preset',
+        'is_custom': 0,
+        'field_mapping_source': '自动映射'
+    },
+    {
+        'id': 'tpl_income_general',
+        'province': '全国',
+        'city': '全国',
+        'district': '',
+        'report_type': '个人所得税',
+        'template_name': '个人所得税扣缴申报表',
+        'template_version': '2024.1',
+        'source_url': 'https://www.chinatax.gov.cn/',
+        'source_authority': '国家税务总局',
+        'publish_date': '2024-01-01',
+        'required_fields': '纳税人识别号,公司名称,收入额,专项扣除,应纳税额',
+        'status': 'active',
+        'file_hash': 'preset_income',
+        'file_type': 'preset',
+        'is_custom': 0,
+        'field_mapping_source': '自动映射'
+    },
+    {
+        'id': 'tpl_corporate_general',
+        'province': '全国',
+        'city': '全国',
+        'district': '',
+        'report_type': '企业所得税',
+        'template_name': '企业所得税年度纳税申报表',
+        'template_version': '2024.1',
+        'source_url': 'https://www.chinatax.gov.cn/',
+        'source_authority': '国家税务总局',
+        'publish_date': '2024-01-01',
+        'required_fields': '纳税人识别号,公司名称,营业收入,营业成本,应纳税所得额,应纳税额',
+        'status': 'active',
+        'file_hash': 'preset_corporate',
+        'file_type': 'preset',
+        'is_custom': 0,
+        'field_mapping_source': '自动映射'
+    }
+]
+
+def init_preset_templates():
+    """初始化预置模板"""
+    existing = load_templates()
+    existing_names = {t['template_name'] for t in existing}
+    added = 0
+    for pt in PRESET_TEMPLATES:
+        if pt['template_name'] not in existing_names:
+            save_template(pt)
+            added += 1
+    return added
+
+init_preset_templates()
+
+# ========== 【核心】完整默认规则库 ==========
 PROVINCE_DEFAULT_RULES = [
-    # 直辖市
     {'city': '上海', 'province': '上海', 'unit_social': 0.16, 'personal_social': 0.08,
      'unit_fund': 0.07, 'personal_fund': 0.07, 'social_min': 7310, 'social_max': 36549,
      'fund_min': 2590, 'fund_max': 34188, 'source_quote': '沪人社规〔2024〕22号'},
@@ -569,7 +849,6 @@ PROVINCE_DEFAULT_RULES = [
     {'city': '重庆', 'province': '重庆', 'unit_social': 0.16, 'personal_social': 0.08,
      'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3957, 'social_max': 19784,
      'fund_min': 2100, 'fund_max': 24595, 'source_quote': '渝人社发〔2024〕5号'},
-    # 广东
     {'city': '广州', 'province': '广东', 'unit_social': 0.15, 'personal_social': 0.08,
      'unit_fund': 0.10, 'personal_fund': 0.10, 'social_min': 4588, 'social_max': 22941,
      'fund_min': 2300, 'fund_max': 27960, 'source_quote': '穗人社发〔2024〕3号'},
@@ -582,92 +861,75 @@ PROVINCE_DEFAULT_RULES = [
     {'city': '佛山', 'province': '广东', 'unit_social': 0.15, 'personal_social': 0.08,
      'unit_fund': 0.10, 'personal_fund': 0.10, 'social_min': 4588, 'social_max': 22941,
      'fund_min': 1900, 'fund_max': 25431, 'source_quote': '佛人社发〔2024〕5号'},
-    # 江苏
     {'city': '南京', 'province': '江苏', 'unit_social': 0.16, 'personal_social': 0.08,
      'unit_fund': 0.08, 'personal_fund': 0.08, 'social_min': 4250, 'social_max': 22470,
      'fund_min': 2280, 'fund_max': 27841, 'source_quote': '宁人社发〔2024〕5号'},
     {'city': '苏州', 'province': '江苏', 'unit_social': 0.16, 'personal_social': 0.08,
      'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 4250, 'social_max': 22470,
      'fund_min': 2280, 'fund_max': 27874, 'source_quote': '苏人社发〔2024〕6号'},
-    # 浙江
     {'city': '杭州', 'province': '浙江', 'unit_social': 0.15, 'personal_social': 0.08,
      'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3957, 'social_max': 22941,
      'fund_min': 2280, 'fund_max': 27874, 'source_quote': '杭人社发〔2024〕6号'},
     {'city': '宁波', 'province': '浙江', 'unit_social': 0.15, 'personal_social': 0.08,
      'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3957, 'social_max': 22941,
      'fund_min': 2280, 'fund_max': 27874, 'source_quote': '甬人社发〔2024〕5号'},
-    # 四川
     {'city': '成都', 'province': '四川', 'unit_social': 0.16, 'personal_social': 0.08,
      'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 4071, 'social_max': 20355,
      'fund_min': 2100, 'fund_max': 25401, 'source_quote': '成人社发〔2024〕7号'},
     {'city': '绵阳', 'province': '四川', 'unit_social': 0.16, 'personal_social': 0.08,
      'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 0, 'social_max': 999999,
      'fund_min': 0, 'fund_max': 999999, 'source_quote': '系统默认（建议核实）'},
-    # 湖北
     {'city': '武汉', 'province': '湖北', 'unit_social': 0.16, 'personal_social': 0.08,
      'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 4077, 'social_max': 20385,
      'fund_min': 2010, 'fund_max': 24114, 'source_quote': '武人社发〔2024〕4号'},
     {'city': '襄阳', 'province': '湖北', 'unit_social': 0.16, 'personal_social': 0.08,
      'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 0, 'social_max': 999999,
      'fund_min': 0, 'fund_max': 999999, 'source_quote': '系统默认（建议核实）'},
-    # 山东
     {'city': '青岛', 'province': '山东', 'unit_social': 0.16, 'personal_social': 0.08,
      'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3746, 'social_max': 18726,
      'fund_min': 2010, 'fund_max': 23496, 'source_quote': '青人社发〔2024〕4号'},
     {'city': '济南', 'province': '山东', 'unit_social': 0.16, 'personal_social': 0.08,
      'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3746, 'social_max': 18726,
      'fund_min': 2010, 'fund_max': 23496, 'source_quote': '济人社发〔2024〕5号'},
-    # 陕西
     {'city': '西安', 'province': '陕西', 'unit_social': 0.16, 'personal_social': 0.08,
      'unit_fund': 0.10, 'personal_fund': 0.10, 'social_min': 3957, 'social_max': 19784,
      'fund_min': 1950, 'fund_max': 23556, 'source_quote': '西人社发〔2024〕6号'},
-    # 辽宁
     {'city': '沈阳', 'province': '辽宁', 'unit_social': 0.16, 'personal_social': 0.08,
      'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 4100, 'social_max': 20500,
      'fund_min': 2100, 'fund_max': 25200, 'source_quote': '沈人社发〔2024〕5号'},
     {'city': '大连', 'province': '辽宁', 'unit_social': 0.16, 'personal_social': 0.08,
      'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 4100, 'social_max': 20500,
      'fund_min': 2100, 'fund_max': 25200, 'source_quote': '大人社发〔2024〕4号'},
-    # 福建
     {'city': '福州', 'province': '福建', 'unit_social': 0.16, 'personal_social': 0.08,
      'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 4100, 'social_max': 20500,
      'fund_min': 2100, 'fund_max': 25200, 'source_quote': '榕人社发〔2024〕5号'},
     {'city': '厦门', 'province': '福建', 'unit_social': 0.16, 'personal_social': 0.08,
      'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 4100, 'social_max': 20500,
      'fund_min': 2100, 'fund_max': 25200, 'source_quote': '厦人社发〔2024〕4号'},
-    # 河北
     {'city': '石家庄', 'province': '河北', 'unit_social': 0.16, 'personal_social': 0.08,
      'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3800, 'social_max': 19000,
      'fund_min': 1900, 'fund_max': 22800, 'source_quote': '石人社发〔2024〕5号'},
-    # 安徽
     {'city': '合肥', 'province': '安徽', 'unit_social': 0.16, 'personal_social': 0.08,
      'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3900, 'social_max': 19500,
      'fund_min': 1950, 'fund_max': 23400, 'source_quote': '合人社发〔2024〕5号'},
-    # 江西
     {'city': '南昌', 'province': '江西', 'unit_social': 0.16, 'personal_social': 0.08,
      'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3800, 'social_max': 19000,
      'fund_min': 1900, 'fund_max': 22800, 'source_quote': '洪人社发〔2024〕4号'},
-    # 山西
     {'city': '太原', 'province': '山西', 'unit_social': 0.16, 'personal_social': 0.08,
      'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3700, 'social_max': 18500,
      'fund_min': 1850, 'fund_max': 22200, 'source_quote': '并人社发〔2024〕4号'},
-    # 吉林
     {'city': '长春', 'province': '吉林', 'unit_social': 0.16, 'personal_social': 0.08,
      'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3700, 'social_max': 18500,
      'fund_min': 1850, 'fund_max': 22200, 'source_quote': '长人社发〔2024〕4号'},
-    # 黑龙江
     {'city': '哈尔滨', 'province': '黑龙江', 'unit_social': 0.16, 'personal_social': 0.08,
      'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3600, 'social_max': 18000,
      'fund_min': 1800, 'fund_max': 21600, 'source_quote': '哈人社发〔2024〕4号'},
-    # 云南
     {'city': '昆明', 'province': '云南', 'unit_social': 0.16, 'personal_social': 0.08,
      'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3700, 'social_max': 18500,
      'fund_min': 1850, 'fund_max': 22200, 'source_quote': '昆人社发〔2024〕5号'},
-    # 贵州
     {'city': '贵阳', 'province': '贵州', 'unit_social': 0.16, 'personal_social': 0.08,
      'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3600, 'social_max': 18000,
      'fund_min': 1800, 'fund_max': 21600, 'source_quote': '筑人社发〔2024〕4号'},
-    # 甘肃
     {'city': '兰州', 'province': '甘肃', 'unit_social': 0.16, 'personal_social': 0.08,
      'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3500, 'social_max': 17500,
      'fund_min': 1750, 'fund_max': 21000, 'source_quote': '兰人社发〔2024〕4号'},
@@ -677,7 +939,6 @@ PROVINCE_DEFAULT_RULES = [
     {'city': '张掖', 'province': '甘肃', 'unit_social': 0.16, 'personal_social': 0.08,
      'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 0, 'social_max': 999999,
      'fund_min': 0, 'fund_max': 999999, 'source_quote': '系统默认（甘肃）'},
-    # 青海
     {'city': '西宁', 'province': '青海', 'unit_social': 0.16, 'personal_social': 0.08,
      'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3400, 'social_max': 17000,
      'fund_min': 1700, 'fund_max': 20400, 'source_quote': '宁人社发〔2024〕4号'},
@@ -687,7 +948,6 @@ PROVINCE_DEFAULT_RULES = [
     {'city': '格尔木', 'province': '青海', 'unit_social': 0.16, 'personal_social': 0.08,
      'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 0, 'social_max': 999999,
      'fund_min': 0, 'fund_max': 999999, 'source_quote': '系统默认（青海）'},
-    # 宁夏
     {'city': '银川', 'province': '宁夏', 'unit_social': 0.16, 'personal_social': 0.08,
      'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3500, 'social_max': 17500,
      'fund_min': 1750, 'fund_max': 21000, 'source_quote': '银人社发〔2024〕4号'},
@@ -697,7 +957,6 @@ PROVINCE_DEFAULT_RULES = [
     {'city': '吴忠', 'province': '宁夏', 'unit_social': 0.16, 'personal_social': 0.08,
      'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 0, 'social_max': 999999,
      'fund_min': 0, 'fund_max': 999999, 'source_quote': '系统默认（宁夏）'},
-    # 内蒙古
     {'city': '呼和浩特', 'province': '内蒙古', 'unit_social': 0.16, 'personal_social': 0.08,
      'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3600, 'social_max': 18000,
      'fund_min': 1800, 'fund_max': 21600, 'source_quote': '呼人社发〔2024〕4号'},
@@ -707,30 +966,24 @@ PROVINCE_DEFAULT_RULES = [
     {'city': '鄂尔多斯', 'province': '内蒙古', 'unit_social': 0.16, 'personal_social': 0.08,
      'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 0, 'social_max': 999999,
      'fund_min': 0, 'fund_max': 999999, 'source_quote': '系统默认（内蒙古）'},
-    # 新疆
     {'city': '乌鲁木齐', 'province': '新疆', 'unit_social': 0.16, 'personal_social': 0.08,
      'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3500, 'social_max': 17500,
      'fund_min': 1750, 'fund_max': 21000, 'source_quote': '乌人社发〔2024〕4号'},
-    # 西藏
     {'city': '拉萨', 'province': '西藏', 'unit_social': 0.16, 'personal_social': 0.08,
      'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3300, 'social_max': 16500,
      'fund_min': 1650, 'fund_max': 19800, 'source_quote': '拉人社发〔2024〕4号'},
-    # 海南
     {'city': '海口', 'province': '海南', 'unit_social': 0.16, 'personal_social': 0.08,
      'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3800, 'social_max': 19000,
      'fund_min': 1900, 'fund_max': 22800, 'source_quote': '海人社发〔2024〕4号'},
-    # 广西
     {'city': '南宁', 'province': '广西', 'unit_social': 0.16, 'personal_social': 0.08,
      'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3600, 'social_max': 18000,
      'fund_min': 1800, 'fund_max': 21600, 'source_quote': '南人社发〔2024〕4号'},
-    # 贵州（补充）
     {'city': '遵义', 'province': '贵州', 'unit_social': 0.16, 'personal_social': 0.08,
      'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 0, 'social_max': 999999,
      'fund_min': 0, 'fund_max': 999999, 'source_quote': '系统默认（贵州）'},
     {'city': '六盘水', 'province': '贵州', 'unit_social': 0.16, 'personal_social': 0.08,
      'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 0, 'social_max': 999999,
      'fund_min': 0, 'fund_max': 999999, 'source_quote': '系统默认（贵州）'},
-    # 云南（补充）
     {'city': '曲靖', 'province': '云南', 'unit_social': 0.16, 'personal_social': 0.08,
      'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 0, 'social_max': 999999,
      'fund_min': 0, 'fund_max': 999999, 'source_quote': '系统默认（云南）'},
@@ -741,10 +994,8 @@ PROVINCE_DEFAULT_RULES = [
 
 # ========== 初始化规则 ==========
 def init_rules_from_default():
-    """初始化规则，如果规则表为空则全部插入"""
     existing = load_rules()
     if existing:
-        # 检查是否缺失某些城市，补全
         existing_cities = {normalize_name(r['city']) for r in existing}
         added = 0
         for dr in PROVINCE_DEFAULT_RULES:
@@ -772,14 +1023,14 @@ def init_rules_from_default():
                     'collected_at': datetime.now().isoformat(),
                     'applicable_region': dr['province'],
                     'official_channel': '系统默认',
-                    'notes': '自动补全'
+                    'notes': '自动补全',
+                    'use_count': 0
                 }
                 existing.append(new_rule)
                 added += 1
         if added > 0:
             save_rules(existing)
         return
-    # 空表，全量插入
     all_rules = []
     for dr in PROVINCE_DEFAULT_RULES:
         all_rules.append({
@@ -804,7 +1055,8 @@ def init_rules_from_default():
             'collected_at': datetime.now().isoformat(),
             'applicable_region': dr.get('province', dr['city']),
             'official_channel': '系统默认',
-            'notes': '初始化'
+            'notes': '初始化',
+            'use_count': 0
         })
     save_rules(all_rules)
 
@@ -834,21 +1086,35 @@ def match_template_with_details(province, city, district, report_type):
     candidates = [t for t in templates if normalize_name(t['province']) == norm_prov and t['report_type'] == report_type]
     return matched, match_level, candidates
 
-def recommend_template(province, city, report_type, templates):
+# ========== 【优化2】模板推荐（含使用频次） ==========
+def recommend_template_with_score(province, city, report_type, templates):
+    """推荐模板，优先使用频次高的"""
     if not templates:
         return None, "无可用模板"
     norm_prov = normalize_name(province)
     norm_city = normalize_name(city)
+    candidates = []
     for t in templates:
+        score = 0
+        match_type = ""
         if normalize_name(t['province']) == norm_prov and normalize_name(t['city']) == norm_city and t['report_type'] == report_type:
-            return t, f"✅ 精确匹配：{province} {city} {report_type}"
-    for t in templates:
-        if normalize_name(t['city']) == norm_city and t['report_type'] == report_type:
-            return t, f"📌 城市级匹配：{city}（跨省通用）"
-    for t in templates:
-        if normalize_name(t['province']) == norm_prov and t['report_type'] == report_type:
-            return t, f"📌 省级匹配：{province}（省级通用）"
-    return None, "💡 无精确匹配，建议使用通用模板"
+            score += 100
+            match_type = "精确匹配"
+        elif normalize_name(t['city']) == norm_city and t['report_type'] == report_type:
+            score += 50
+            match_type = "城市级匹配"
+        elif normalize_name(t['province']) == norm_prov and t['report_type'] == report_type:
+            score += 30
+            match_type = "省级匹配"
+        # 使用频次加分
+        score += t.get('use_count', 0) * 0.1
+        candidates.append((t, score, match_type))
+    if candidates:
+        candidates.sort(key=lambda x: x[1], reverse=True)
+        best, best_score, match_type = candidates[0]
+        if best_score >= 30:
+            return best, f"✅ {match_type}（使用{best.get('use_count',0)}次）"
+    return None, "💡 无匹配，建议使用通用模板"
 
 def get_custom_template_field_mapping(custom_template):
     if not custom_template:
@@ -928,28 +1194,31 @@ def highlight_error_rows(df, error_rows):
             return [''] * len(row)
     return df.style.apply(row_style, axis=1)
 
-def parse_companies_from_sheet(file, sheet_name):
-    """直接从指定Sheet解析公司数据"""
+def parse_companies_from_sheet(file, sheet_name, user_id="default"):
+    """直接从指定Sheet解析公司数据，支持列映射记忆"""
     try:
         df = pd.read_excel(file, sheet_name=sheet_name)
         df.columns = [str(c).strip() for c in df.columns]
         df = df.dropna(how='all')
-        province_col = None
-        city_col = None
-        district_col = None
-        company_col = None
-        for col in df.columns:
-            col_lower = col.lower().strip()
-            if '省份' in col_lower:
-                province_col = col
-            elif any(kw in col_lower for kw in ['城市', '所属城市']):
-                city_col = col
-            elif any(kw in col_lower for kw in ['城区', '区县', '区']):
-                district_col = col
-            elif any(kw in col_lower for kw in ['公司名称', '公司', '企业名称']):
-                company_col = col
+        
+        # 【优化2】加载记忆的列映射
+        mapping = load_column_mappings(user_id)
+        if mapping:
+            city_col = mapping.get('city_col')
+            company_col = mapping.get('company_col')
+            district_col = mapping.get('district_col')
+            # 验证列是否存在
+            if city_col and city_col in df.columns and company_col and company_col in df.columns:
+                pass
+            else:
+                city_col, company_col, district_col = detect_columns(df)
+        else:
+            city_col, company_col, district_col = detect_columns(df)
+        
+        # 如果检测不到，让用户选择（在调用处处理）
         if not city_col or not company_col:
-            return [], set()
+            return [], set(), list(df.columns)
+        
         city_province_map = {}
         for r in load_rules():
             key = normalize_name(r['city'])
@@ -959,15 +1228,13 @@ def parse_companies_from_sheet(file, sheet_name):
         for _, row in df.iterrows():
             city = str(row[city_col]) if pd.notna(row[city_col]) else ''
             company = str(row[company_col]) if pd.notna(row[company_col]) else ''
-            province = str(row[province_col]) if province_col and pd.notna(row[province_col]) else ''
             district = str(row[district_col]) if district_col and pd.notna(row[district_col]) else ''
             if not city or not company:
                 continue
+            norm_city = normalize_name(city)
+            province = city_province_map.get(norm_city, '')
             if not province:
-                norm_city = normalize_name(city)
-                province = city_province_map.get(norm_city, '')
-                if not province:
-                    unmapped_cities.add(city)
+                unmapped_cities.add(city)
             companies.append({
                 'company_name': company,
                 'province': province,
@@ -975,10 +1242,10 @@ def parse_companies_from_sheet(file, sheet_name):
                 'district': district,
                 'tax_id': ''
             })
-        return companies, unmapped_cities
+        return companies, unmapped_cities, list(df.columns)
     except Exception as e:
         st.error(f"解析Sheet失败: {e}")
-        return [], set()
+        return [], set(), []
 
 def parse_uploaded_excel(file):
     xls = pd.ExcelFile(file)
@@ -1147,11 +1414,9 @@ def get_rule_for_city(city, province=None):
         return None
     rules = load_rules()
     norm_city = normalize_name(city)
-    # 精确匹配
     for r in rules:
         if normalize_name(r['city']) == norm_city:
             return r
-    # 省份匹配
     if province:
         norm_prov = normalize_name(province)
         for r in rules:
@@ -1159,7 +1424,6 @@ def get_rule_for_city(city, province=None):
                 fallback = r.copy()
                 fallback['source_quote'] = f"省份默认（{province}）"
                 return fallback
-    # 【核心】自动创建默认规则
     new_rule = {
         'id': str(uuid.uuid4())[:8],
         'city': city,
@@ -1182,7 +1446,8 @@ def get_rule_for_city(city, province=None):
         'collected_at': datetime.now().isoformat(),
         'applicable_region': province or '全国',
         'official_channel': '系统自动创建',
-        'notes': f'城市{city}未找到规则，自动创建默认规则'
+        'notes': f'城市{city}未找到规则，自动创建默认规则',
+        'use_count': 0
     }
     rules.append(new_rule)
     save_rules(rules)
@@ -1203,7 +1468,7 @@ def batch_create_missing_rules():
         norm_city = normalize_name(city)
         if norm_city not in existing_cities:
             province = comp.get('province', '')
-            get_rule_for_city(city, province)  # 自动创建
+            get_rule_for_city(city, province)
             added += 1
             existing_cities.add(norm_city)
     return added, f"已补全 {added} 个城市规则"
@@ -1275,6 +1540,48 @@ def create_pdf_from_html(html_content, title="报表"):
     """
     return full_html
 
+# ========== 【优化6】邮件发送功能 ==========
+def show_email_config():
+    """邮件配置界面"""
+    st.subheader("📧 邮件发送配置")
+    config = load_email_config()
+    with st.form(key="email_config_form"):
+        smtp_server = st.text_input("SMTP服务器", value=config.get('smtp_server', 'smtp.qq.com') if config else 'smtp.qq.com')
+        smtp_port = st.number_input("SMTP端口", value=config.get('smtp_port', 465) if config else 465, step=1)
+        sender_email = st.text_input("发件邮箱", value=config.get('sender_email', '') if config else '')
+        sender_password = st.text_input("邮箱授权码", value=config.get('sender_password', '') if config else '', type="password")
+        recipient_email = st.text_input("默认收件人", value=config.get('recipient_email', '') if config else '')
+        submitted = st.form_submit_button("保存配置")
+        if submitted:
+            save_email_config({
+                'smtp_server': smtp_server,
+                'smtp_port': smtp_port,
+                'sender_email': sender_email,
+                'sender_password': sender_password,
+                'recipient_email': recipient_email
+            })
+            st.success("邮件配置已保存！")
+            log_audit("系统", "SAVE_EMAIL_CONFIG", "config", "", "保存邮件配置")
+            st.rerun()
+
+# ========== 【优化5】数据版本对比 ==========
+def show_data_versions():
+    """显示数据版本历史"""
+    st.subheader("📊 数据版本历史")
+    versions = load_data_versions()
+    if versions:
+        df = pd.DataFrame(versions)
+        st.dataframe(df[['version_number', 'created_at', 'record_count', 'file_name', 'notes']], use_container_width=True)
+        # 下载历史版本
+        selected_version = st.selectbox("选择版本下载", [f"v{v['version_number']} - {v['created_at'][:16]}" for v in versions])
+        if selected_version:
+            idx = int(selected_version.split(' - ')[0][1:]) - 1
+            if idx < len(versions):
+                v = versions[idx]
+                st.download_button(f"📥 下载 v{v['version_number']}", data=BytesIO(v['file_data']), file_name=v['file_name'])
+    else:
+        st.info("暂无数据版本记录")
+
 # ========== Streamlit 页面 ==========
 st.set_page_config(page_title="智能报表系统 - 企业版", layout="wide")
 st.title("📋 智能报表系统（企业版）")
@@ -1296,7 +1603,9 @@ page = st.sidebar.radio("选择功能", [
     "📋 导出历史与复核",
     "💾 备份与恢复",
     "📋 年审数据处理",
-    "🔐 审计日志"
+    "🔐 审计日志",
+    "📧 邮件发送配置",  # 新增
+    "📊 数据版本对比"   # 新增
 ])
 
 # ===== 各页面 =====
@@ -1368,7 +1677,41 @@ elif page == "📤 数据导入":
             if not default_sheet:
                 default_sheet = all_sheets[0]
             st.session_state['selected_sheet'] = default_sheet
-            companies, unmapped = parse_companies_from_sheet(first_file, default_sheet)
+            # 【优化2】使用列映射记忆
+            companies, unmapped, columns = parse_companies_from_sheet(first_file, default_sheet, user_id="default")
+            # 如果检测不到列，让用户选择
+            if not companies and columns:
+                st.warning("未能自动识别列，请手动选择")
+                city_col = st.selectbox("请选择城市列", [""] + columns)
+                company_col = st.selectbox("请选择公司列", [""] + columns)
+                district_col = st.selectbox("请选择区县列（可选）", [""] + columns)
+                if city_col and company_col:
+                    # 重新解析
+                    df = pd.read_excel(first_file, sheet_name=default_sheet)
+                    city_province_map = {}
+                    for r in load_rules():
+                        key = normalize_name(r['city'])
+                        city_province_map[key] = r['province']
+                    companies = []
+                    unmapped = set()
+                    for _, row in df.iterrows():
+                        city = str(row[city_col]) if pd.notna(row[city_col]) else ''
+                        company = str(row[company_col]) if pd.notna(row[company_col]) else ''
+                        district = str(row[district_col]) if district_col and pd.notna(row[district_col]) else ''
+                        if city and company:
+                            norm_city = normalize_name(city)
+                            province = city_province_map.get(norm_city, '')
+                            if not province:
+                                unmapped.add(city)
+                            companies.append({
+                                'company_name': company,
+                                'province': province,
+                                'city': city,
+                                'district': district,
+                                'tax_id': ''
+                            })
+                    # 保存映射记忆
+                    save_column_mapping("default", default_sheet, city_col, company_col, district_col)
             if companies:
                 save_companies(companies)
                 log_audit("系统", "UPLOAD", "companies", "", f"导入 {len(companies)} 家公司")
@@ -1392,6 +1735,8 @@ elif page == "📤 数据导入":
                     'total_rows': len(df) if df is not None else 0,
                     'companies_extracted': len(companies)
                 }
+                # 保存数据版本
+                save_data_version(len(companies), first_file.name, first_file.getvalue(), f"导入 {len(companies)} 家公司")
             else:
                 st.error("未提取到任何公司数据，请检查Sheet是否正确")
     
@@ -1412,7 +1757,7 @@ elif page == "📤 数据导入":
         with col_btn1:
             if st.button("🔄 重新加载此Sheet数据", key="reload_sheet_data"):
                 st.session_state['selected_sheet'] = selected_sheet
-                companies, unmapped = parse_companies_from_sheet(first_file, selected_sheet)
+                companies, unmapped, columns = parse_companies_from_sheet(first_file, selected_sheet, user_id="default")
                 if companies:
                     save_companies(companies)
                     st.success(f"✅ 已重新加载 {len(companies)} 家公司（Sheet: {selected_sheet}）")
@@ -1508,7 +1853,7 @@ elif page == "📚 依据库管理":
         templates = load_templates()
         if templates:
             df = pd.DataFrame(templates)
-            cols = ['template_name', 'report_type', 'province', 'city', 'template_version', 'source_authority']
+            cols = ['template_name', 'report_type', 'province', 'city', 'template_version', 'source_authority', 'use_count']
             st.dataframe(df[cols], use_container_width=True)
         else:
             st.info("暂无模板")
@@ -1516,7 +1861,7 @@ elif page == "📚 依据库管理":
         rules = load_rules()
         if rules:
             df = pd.DataFrame(rules)
-            cols = ['city', 'province', 'unit_social', 'personal_social', 'unit_fund', 'personal_fund', 'source_quote', 'rule_version', 'source_title']
+            cols = ['city', 'province', 'unit_social', 'personal_social', 'unit_fund', 'personal_fund', 'source_quote', 'rule_version', 'use_count']
             st.dataframe(df[cols], use_container_width=True)
         else:
             st.info("暂无规则")
@@ -1675,7 +2020,7 @@ elif page == "⚙️ 规则管理":
     st.write(f"**当前规则数量：{len(rules)} 个城市**")
     if rules:
         df_rules = pd.DataFrame(rules)
-        st.dataframe(df_rules[['city', 'province', 'unit_social', 'personal_social', 'unit_fund', 'personal_fund', 'social_min', 'social_max', 'source_quote', 'rule_version', 'source_url', 'source_title']], use_container_width=True)
+        st.dataframe(df_rules[['city', 'province', 'unit_social', 'personal_social', 'unit_fund', 'personal_fund', 'social_min', 'social_max', 'source_quote', 'rule_version', 'use_count']], use_container_width=True)
         
         col_btn1, col_btn2, col_btn3 = st.columns(3)
         with col_btn1:
@@ -1774,7 +2119,8 @@ elif page == "⚙️ 规则管理":
                             'collected_at': datetime.now().isoformat(),
                             'applicable_region': new_applicable_region,
                             'official_channel': new_official_channel,
-                            'notes': new_notes
+                            'notes': new_notes,
+                            'use_count': 0
                         }
                         rules.append(new_rule)
                         save_rules(rules)
@@ -1877,6 +2223,13 @@ elif page == "📄 自定义模板":
             field_mapping_source = st.text_input("字段映射来源说明（可选）")
             wb = load_workbook(BytesIO(uploaded_template.getvalue()))
             ws = wb.active if not sheet_name else wb[sheet_name] if sheet_name in wb.sheetnames else wb.active
+            
+            # 【优化4】模板预览
+            st.subheader("📄 模板预览")
+            preview_df = pd.DataFrame([cell.value for cell in ws[1] if cell.value])
+            if not preview_df.empty:
+                st.dataframe(preview_df.head(10), use_container_width=True)
+            
             headers = []
             for cell in ws[1]:
                 if cell.value:
@@ -2251,6 +2604,12 @@ elif page == "🔐 审计日志":
     else:
         st.info("暂无操作日志")
 
+elif page == "📧 邮件发送配置":
+    show_email_config()
+
+elif page == "📊 数据版本对比":
+    show_data_versions()
+
 # ===== 底部：快速生成报表 =====
 st.markdown("---")
 st.subheader("🚀 快速生成报表")
@@ -2266,6 +2625,21 @@ else:
         if not companies:
             st.stop()
     all_provinces = sorted(set(c['province'] for c in companies if c['province']))
+    
+    # 【优化3】按省份批量选择
+    st.markdown("**批量选择公司（按省份/城市）**")
+    batch_province = st.selectbox("批量选择省份", [""] + all_provinces, key="batch_province")
+    batch_cities = []
+    if batch_province:
+        batch_cities = sorted(set(c['city'] for c in companies if c['province'] == batch_province))
+    batch_city = st.selectbox("批量选择城市（可选）", [""] + batch_cities, key="batch_city")
+    if st.button("📌 选中该地区所有公司", key="batch_select_companies"):
+        if batch_province:
+            selected = [c['company_name'] for c in companies if c['province'] == batch_province and (not batch_city or c['city'] == batch_city)]
+            st.session_state['batch_selected_companies'] = selected
+            st.success(f"已选中 {len(selected)} 家公司")
+            st.rerun()
+    
     col1, col2, col3 = st.columns(3)
     with col1:
         province = st.selectbox("省份", [""] + all_provinces, key="report_province")
@@ -2285,7 +2659,9 @@ else:
         else:
             company_list = []
         company_names = [c['company_name'] for c in company_list]
-        selected_company_names = st.multiselect("公司（可多选）", company_names, key="report_companies")
+        # 如果有批量选中的公司，默认选中
+        default_selected = st.session_state.get('batch_selected_companies', [])
+        selected_company_names = st.multiselect("公司（可多选）", company_names, default=default_selected, key="report_companies")
     with col3:
         report_type = st.selectbox("报表类型", ["", "增值税", "社保", "公积金", "个人所得税", "企业所得税", "年度汇算清缴"], key="report_type")
         period_type = st.selectbox("统计口径", ["月度（固定月份）", "累计（1-12月）", "自定义月份范围"], key="period_type")
@@ -2311,11 +2687,14 @@ else:
         matched, match_level, candidates = match_template_with_details(province, city, district, report_type)
         custom_templates = load_custom_templates()
         all_templates = load_templates()
-        recommended, reason = recommend_template(province, city, report_type, all_templates)
+        
+        # 【优化2】使用带评分的推荐
+        recommended, reason = recommend_template_with_score(province, city, report_type, all_templates)
         if recommended:
             st.info(f"💡 推荐模板：**{recommended['template_name']}**（{reason}）")
         else:
             st.info(f"💡 {reason}，请从下方选择")
+        
         options = {}
         if matched:
             options[f"✅ 官方模板：{matched['template_name']}（{match_level}）"] = {'type': 'official', 'data': matched}
@@ -2375,6 +2754,7 @@ else:
                 st.write(f"模板名称：{selected_template['template_name']}")
                 st.write(f"模板版本：{selected_template.get('template_version', 'v1.0')}")
                 st.write(f"匹配级别：{match_level if matched else '通用模板'}")
+                st.write(f"使用次数：{selected_template.get('use_count', 0)} 次")
             with col_b:
                 st.markdown("**规则**")
                 if selected_companies:
@@ -2386,6 +2766,7 @@ else:
                         st.write(f"来源链接：{rule.get('source_url', '#')}")
                         st.write(f"来源标题：{rule.get('source_title', '')}")
                         st.write(f"生效日期：{rule.get('effective_date', '未知')}")
+                        st.write(f"使用次数：{rule.get('use_count', 0)} 次")
                     else:
                         st.write("规则：未匹配，将使用默认值")
                 else:
@@ -2455,11 +2836,17 @@ else:
                 progress_bar = st.progress(0)
                 status_text = st.empty()
                 total = len(selected_companies)
+                
+                # 记录使用的模板
+                increment_template_use(selected_template['id'])
+                
                 for idx, comp in enumerate(selected_companies):
                     status_text.text(f"正在处理 {idx+1}/{total}: {comp['company_name']}")
                     progress_bar.progress((idx + 1) / total)
                     try:
                         rule = get_rule_for_city(comp['city'], comp.get('province'))
+                        if rule and rule.get('id'):
+                            increment_rule_use(rule['id'])
                         if rule is None:
                             rule = {'unit_social': 0.16, 'personal_social': 0.08, 'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 0, 'social_max': 999999, 'fund_min': 0, 'fund_max': 999999, 'source_quote': '全局默认', 'rule_version': 'v1.0', 'source_title': '系统内置默认值', 'source_url': '#', 'source_publish_date': datetime.now().strftime('%Y-%m-%d'), 'applicable_region': '全国', 'official_channel': '系统内置'}
                         fields = selected_template.get('required_fields', '').split(',')
@@ -2527,7 +2914,7 @@ else:
                         ws['A1'].alignment = Alignment(horizontal='center')
                         ws['A1'].fill = PatternFill(start_color='FFF9E6', end_color='FFF9E6', fill_type='solid')
                         ws.insert_rows(2)
-                        ws['A2'] = f'模板名称：{selected_template["template_name"]}  版本：{selected_template.get("template_version", "v1.0")}'
+                        ws['A2'] = f'模板名称：{selected_template["template_name"]}  版本：{selected_template.get("template_version", "v1.0")}  使用次数：{selected_template.get("use_count", 0)}'
                         ws['A2'].font = Font(color='666666', size=10)
                         ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=len(fields) if fields else 1)
                         ws.insert_rows(3)
@@ -2539,7 +2926,7 @@ else:
                         ws['A4'].font = Font(color='666666', size=10)
                         ws.merge_cells(start_row=4, start_column=1, end_row=4, end_column=len(fields) if fields else 1)
                         ws.insert_rows(5)
-                        ws['A5'] = f'规则来源：{rule.get("source_quote", "未配置")}  规则版本：{rule.get("rule_version", "v1.0")}'
+                        ws['A5'] = f'规则来源：{rule.get("source_quote", "未配置")}  规则版本：{rule.get("rule_version", "v1.0")}  使用次数：{rule.get("use_count", 0)}'
                         ws['A5'].font = Font(color='666666', size=10)
                         ws.merge_cells(start_row=5, start_column=1, end_row=5, end_column=len(fields) if fields else 1)
                         ws.insert_rows(6)
@@ -2649,39 +3036,4 @@ else:
                             'field_mapping': json.dumps({f: f for f in fields})
                         })
                     except Exception as e:
-                        errors.append(f"{comp['company_name']}: {str(e)}")
-                        job_details.append({'id': str(uuid.uuid4())[:8], 'batch_id': batch_id, 'company_id': comp.get('id', ''), 'company_name': comp['company_name'], 'city': comp.get('city', ''), 'province': comp.get('province', ''), 'report_type': report_type, 'period_type': period_label, 'status': 'error', 'error_message': str(e), 'file_name': '', 'file_data': None, 'generated_at': datetime.now().isoformat(), 'rule_source': '', 'data_source': data_source_text})
-                progress_bar.empty()
-                status_text.empty()
-                save_job_details(job_details)
-                update_batch_status(batch_id, 'completed', 'pending')
-                log_audit("系统", "GENERATE", "batch", batch_id, f"生成报表批次 {batch_name}，{len(generated_files)} 份")
-                if errors:
-                    for err in errors:
-                        st.warning(err)
-                if generated_files:
-                    st.success(f"✅ 成功生成 {len(generated_files)} 份报表（批次ID：{batch_id}，状态：已完成）")
-                    st.dataframe(pd.DataFrame(summary), use_container_width=True)
-                    if PDF_AVAILABLE:
-                        try:
-                            df_summary = pd.DataFrame(summary)
-                            html_content = df_to_html_table(df_summary)
-                            full_html = create_pdf_from_html(html_content, f"报表_{datetime.now().strftime('%Y%m%d')}")
-                            pdf_buffer = BytesIO()
-                            pdfkit.from_string(full_html, pdf_buffer)
-                            pdf_buffer.seek(0)
-                            st.download_button("📄 下载报表摘要（PDF）", data=pdf_buffer, file_name=f"报表摘要_{datetime.now().strftime('%Y%m%d')}.pdf", mime="application/pdf")
-                        except Exception as e:
-                            st.warning(f"PDF导出失败（请确保已安装wkhtmltopdf）：{e}")
-                    else:
-                        st.warning("💡 PDF导出需要安装 pdfkit 和 wkhtmltopdf")
-                    if len(generated_files) > 1:
-                        zip_buffer = BytesIO()
-                        with zipfile.ZipFile(zip_buffer, 'w') as zf:
-                            for fname, data in generated_files:
-                                zf.writestr(fname, data)
-                        zip_buffer.seek(0)
-                        st.download_button("📦 下载全部报表（ZIP）", data=zip_buffer, file_name=f"报表_{datetime.now().strftime('%Y%m%d')}.zip", mime="application/zip")
-                    else:
-                        fname, data = generated_files[0]
-                        st.download_button(f"📥 下载 {fname}", data=BytesIO(data), file_name=fname, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                        errors.append(f"{comp['company
