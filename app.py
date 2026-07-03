@@ -60,25 +60,30 @@ def restore_backup(backup_file):
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
+    # 公司表
     c.execute('''CREATE TABLE IF NOT EXISTS companies (
         id TEXT PRIMARY KEY, company_name TEXT, province TEXT, city TEXT, district TEXT, tax_id TEXT
     )''')
+    # 模板表
     c.execute('''CREATE TABLE IF NOT EXISTS templates (
         id TEXT PRIMARY KEY, province TEXT, city TEXT, district TEXT, report_type TEXT,
         template_name TEXT, template_version TEXT, source_url TEXT, source_authority TEXT,
         publish_date TEXT, required_fields TEXT, status TEXT, file_hash TEXT, file_type TEXT,
         is_custom BOOLEAN DEFAULT 0, field_mapping_source TEXT
     )''')
+    # 自定义模板
     c.execute('''CREATE TABLE IF NOT EXISTS custom_templates (
         id TEXT PRIMARY KEY, name TEXT, file_data BLOB, field_mapping TEXT,
         sheet_name TEXT, created_at TEXT, updated_at TEXT
     )''')
+    # 规则表
     c.execute('''CREATE TABLE IF NOT EXISTS rules (
         id TEXT PRIMARY KEY, city TEXT, province TEXT, unit_social REAL, personal_social REAL,
         unit_fund REAL, personal_fund REAL, social_min REAL, social_max REAL,
         fund_min REAL, fund_max REAL, source_quote TEXT, is_default BOOLEAN DEFAULT 0,
         rule_version TEXT, effective_date TEXT
     )''')
+    # 导出历史
     c.execute('''CREATE TABLE IF NOT EXISTS export_history (
         id TEXT PRIMARY KEY, company_id TEXT, template_id TEXT, company_name TEXT,
         city TEXT, province TEXT, report_type TEXT, period_type TEXT, generated_at TEXT,
@@ -86,22 +91,38 @@ def init_db():
         data_source TEXT, month_used TEXT, year_used TEXT, custom_period TEXT,
         batch_id TEXT, job_name TEXT, field_mapping TEXT
     )''')
+    # 来源注册表（增强字段）
     c.execute('''CREATE TABLE IF NOT EXISTS source_registry (
         id TEXT PRIMARY KEY, authority_type TEXT, province TEXT, city TEXT, district TEXT,
         authority_name TEXT, official_site_name TEXT, source_url TEXT, source_level TEXT,
         source_section TEXT, is_official BOOLEAN, crawl_allowed BOOLEAN, last_checked TEXT,
         status TEXT, notes TEXT, document_name TEXT, document_version TEXT, publish_year TEXT
     )''')
+    # 批次作业表
     c.execute('''CREATE TABLE IF NOT EXISTS job_batches (
         id TEXT PRIMARY KEY, batch_name TEXT, created_at TEXT, status TEXT,
         total_companies INTEGER, total_reports INTEGER, review_status TEXT,
         parameters TEXT, created_by TEXT
     )''')
+    # 作业详情
     c.execute('''CREATE TABLE IF NOT EXISTS job_details (
         id TEXT PRIMARY KEY, batch_id TEXT, company_id TEXT, company_name TEXT,
         city TEXT, province TEXT, report_type TEXT, period_type TEXT,
         status TEXT, error_message TEXT, file_name TEXT, file_data BLOB,
         generated_at TEXT, rule_source TEXT, data_source TEXT
+    )''')
+    # ===== 新增：核验状态表 =====
+    c.execute('''CREATE TABLE IF NOT EXISTS verification_status (
+        id TEXT PRIMARY KEY,
+        batch_id TEXT,
+        source_verified BOOLEAN DEFAULT 0,
+        template_verified BOOLEAN DEFAULT 0,
+        rule_verified BOOLEAN DEFAULT 0,
+        data_verified BOOLEAN DEFAULT 0,
+        reviewer_name TEXT,
+        verified_at TEXT,
+        notes TEXT,
+        export_type TEXT DEFAULT '验证版'
     )''')
     conn.commit()
     conn.close()
@@ -139,6 +160,22 @@ def migrate_db():
             city TEXT, province TEXT, report_type TEXT, period_type TEXT,
             status TEXT, error_message TEXT, file_name TEXT, file_data BLOB,
             generated_at TEXT, rule_source TEXT, data_source TEXT
+        )''')
+    
+    # 新增：verification_status 表
+    c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='verification_status'")
+    if not c.fetchone():
+        c.execute('''CREATE TABLE verification_status (
+            id TEXT PRIMARY KEY,
+            batch_id TEXT,
+            source_verified BOOLEAN DEFAULT 0,
+            template_verified BOOLEAN DEFAULT 0,
+            rule_verified BOOLEAN DEFAULT 0,
+            data_verified BOOLEAN DEFAULT 0,
+            reviewer_name TEXT,
+            verified_at TEXT,
+            notes TEXT,
+            export_type TEXT DEFAULT '验证版'
         )''')
     conn.commit()
     conn.close()
@@ -190,6 +227,64 @@ def load_job_batches():
 
 def load_job_details(batch_id):
     return safe_execute_query("SELECT * FROM job_details WHERE batch_id=? ORDER BY generated_at DESC", (batch_id,))
+
+def load_verification_status(batch_id):
+    rows = safe_execute_query("SELECT * FROM verification_status WHERE batch_id=?", (batch_id,))
+    return rows[0] if rows else None
+
+def save_verification_status(data):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('''INSERT OR REPLACE INTO verification_status 
+        (id, batch_id, source_verified, template_verified, rule_verified, data_verified,
+         reviewer_name, verified_at, notes, export_type)
+        VALUES (?,?,?,?,?,?,?,?,?,?)''',
+        (data.get('id', str(uuid.uuid4())[:8]), data['batch_id'],
+         data.get('source_verified', 0), data.get('template_verified', 0),
+         data.get('rule_verified', 0), data.get('data_verified', 0),
+         data.get('reviewer_name', ''), data.get('verified_at', datetime.now().isoformat()),
+         data.get('notes', ''), data.get('export_type', '验证版')))
+    conn.commit()
+    conn.close()
+    backup_database()
+
+def update_verification_status(batch_id, field, value):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute(f"UPDATE verification_status SET {field}=? WHERE batch_id=?", (value, batch_id))
+    conn.commit()
+    conn.close()
+    backup_database()
+
+def save_source_registry(sources):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("DELETE FROM source_registry")
+    for s in sources:
+        c.execute('''INSERT OR REPLACE INTO source_registry 
+            (id, authority_type, province, city, district, authority_name,
+             official_site_name, source_url, source_level, source_section,
+             is_official, crawl_allowed, last_checked, status, notes,
+             document_name, document_version, publish_year)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+            (s.get('id', str(uuid.uuid4())[:8]), s.get('authority_type','tax'),
+             s.get('province',''), s.get('city',''), s.get('district',''),
+             s.get('authority_name',''), s.get('official_site_name',''),
+             s.get('source_url',''), s.get('source_level',''), s.get('source_section',''),
+             s.get('is_official',1), s.get('crawl_allowed',1),
+             s.get('last_checked',''), s.get('status','active'), s.get('notes',''),
+             s.get('document_name',''), s.get('document_version',''), s.get('publish_year','')))
+    conn.commit()
+    conn.close()
+    backup_database()
+
+def delete_source_by_id(source_id):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("DELETE FROM source_registry WHERE id=?", (source_id,))
+    conn.commit()
+    conn.close()
+    backup_database()
 
 def save_companies(companies):
     conn = sqlite3.connect(DB_PATH)
@@ -328,28 +423,6 @@ def save_job_details(details):
              d.get('error_message',''), d.get('file_name',''), d.get('file_data', None),
              d.get('generated_at', datetime.now().isoformat()), d.get('rule_source',''),
              d.get('data_source','')))
-    conn.commit()
-    conn.close()
-    backup_database()
-
-def save_source_registry(sources):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("DELETE FROM source_registry")
-    for s in sources:
-        c.execute('''INSERT OR REPLACE INTO source_registry 
-            (id, authority_type, province, city, district, authority_name,
-             official_site_name, source_url, source_level, source_section,
-             is_official, crawl_allowed, last_checked, status, notes,
-             document_name, document_version, publish_year)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
-            (s.get('id', str(uuid.uuid4())[:8]), s.get('authority_type','tax'),
-             s.get('province',''), s.get('city',''), s.get('district',''),
-             s.get('authority_name',''), s.get('official_site_name',''),
-             s.get('source_url',''), s.get('source_level',''), s.get('source_section',''),
-             s.get('is_official',1), s.get('crawl_allowed',1),
-             s.get('last_checked',''), s.get('status','active'), s.get('notes',''),
-             s.get('document_name',''), s.get('document_version',''), s.get('publish_year','')))
     conn.commit()
     conn.close()
     backup_database()
@@ -629,7 +702,7 @@ def apply_custom_template_mapping(wb, data, mapping):
         if field in data:
             ws[cell_ref] = data[field]
 
-# ========== 自动检测表头并读取Sheet（修复版） ==========
+# ========== 自动检测表头并读取Sheet ==========
 def auto_load_sheet_with_header_detection(file, sheet_name):
     xls = pd.ExcelFile(file)
     df_raw = pd.read_excel(file, sheet_name=sheet_name, header=None)
@@ -637,7 +710,6 @@ def auto_load_sheet_with_header_detection(file, sheet_name):
     header_row = None
     for i, row in df_raw.iterrows():
         row_text = ' '.join([str(v) for v in row.values if pd.notna(v)])
-        # 更严格的检测：必须同时包含"城市"和"公司"或"省份"
         if ('城市' in row_text and '公司' in row_text) or ('省份' in row_text and '城市' in row_text):
             header_row = i
             break
@@ -655,28 +727,27 @@ def auto_load_sheet_with_header_detection(file, sheet_name):
 
 # ========== 判断是否为有效中文名称 ==========
 def is_valid_chinese_name(text):
-    """判断文本是否为有效的中文名称（至少包含2个中文字符）"""
     if not text or not isinstance(text, str):
         return False
-    # 至少包含2个中文字符
     chinese_chars = re.findall(r'[\u4e00-\u9fa5]', text)
     return len(chinese_chars) >= 2
 
 def is_valid_city_name(text):
-    """判断是否为有效的城市名（至少包含2个中文字符）"""
     if not text or not isinstance(text, str):
         return False
     chinese_chars = re.findall(r'[\u4e00-\u9fa5]', text)
     return len(chinese_chars) >= 2
 
-# ========== 解析Excel（过滤异常数据） ==========
+# ========== 解析Excel ==========
 def parse_uploaded_excel(file):
     xls = pd.ExcelFile(file)
     sheets = xls.sheet_names
     all_companies = []
     unmapped_cities = set()
-    filtered_values = []  # 记录被过滤的异常值
+    filtered_values = []
+    data_sheet_name = None
     
+    # 构建城市->省份映射
     city_province_map = {}
     for dr in PROVINCE_DEFAULT_RULES:
         key = normalize_name(dr['city'])
@@ -684,6 +755,15 @@ def parse_uploaded_excel(file):
     for r in load_rules():
         key = normalize_name(r['city'])
         city_province_map[key] = r['province']
+    
+    # 寻找数据sheet
+    for s in sheets:
+        s_lower = s.lower()
+        if any(kw in s_lower for kw in ['明细', '月度', '数据', '年检', '主数据', '月报', '季报']):
+            data_sheet_name = s
+            break
+    if not data_sheet_name:
+        data_sheet_name = sheets[0] if sheets else None
     
     for sheet in sheets:
         try:
@@ -713,13 +793,9 @@ def parse_uploaded_excel(file):
                         company = str(row[company_col]) if pd.notna(row[company_col]) else ''
                         district = str(row[district_col]) if district_col and pd.notna(row[district_col]) else ''
                         
-                        # ---- 过滤异常数据 ----
-                        # 1. 城市必须是有效中文名称
                         if city and not is_valid_city_name(city):
                             filtered_values.append(f"城市无效: {city}")
                             continue
-                        
-                        # 2. 公司名称必须是有效中文名称（至少包含2个中文字符）
                         if company and not is_valid_chinese_name(company):
                             filtered_values.append(f"公司名称无效: {company}")
                             continue
@@ -740,7 +816,6 @@ def parse_uploaded_excel(file):
             st.error(f"解析Sheet {sheet} 时出错：{e}")
             continue
     
-    # 如果有过滤掉的异常值，在session中记录以便显示
     if filtered_values:
         st.session_state['filtered_values'] = filtered_values
     
@@ -751,17 +826,20 @@ def parse_uploaded_excel(file):
         if key not in seen:
             seen.add(key)
             unique.append(c)
-    return unique, unmapped_cities, sheets
+    return unique, unmapped_cities, sheets, data_sheet_name
 
 def parse_multiple_files(files):
     all_companies = []
     all_sheets = []
     unmapped_cities = set()
+    data_sheet_name = None
     for file in files:
-        companies, unmapped, sheets = parse_uploaded_excel(file)
+        companies, unmapped, sheets, data_sheet = parse_uploaded_excel(file)
         all_companies.extend(companies)
         all_sheets.extend(sheets)
         unmapped_cities.update(unmapped)
+        if data_sheet and not data_sheet_name:
+            data_sheet_name = data_sheet
     unique = []
     seen = set()
     for c in all_companies:
@@ -769,7 +847,7 @@ def parse_multiple_files(files):
         if key not in seen:
             seen.add(key)
             unique.append(c)
-    return unique, unmapped_cities, all_sheets
+    return unique, unmapped_cities, all_sheets, data_sheet_name
 
 # ========== 数据校验函数 ==========
 def validate_data(df, rules):
@@ -850,7 +928,7 @@ def validate_data(df, rules):
         'error_rows_detail': error_rows
     }
 
-# ========== 核心：获取规则（含省份兜底和全局默认） ==========
+# ========== 核心：获取规则 ==========
 def get_rule_for_city(city, province=None):
     if not city:
         return None
@@ -893,6 +971,20 @@ def get_data_source_info(df):
 def generate_batch_id():
     return f"BATCH_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{str(uuid.uuid4())[:4]}"
 
+# ========== 获取核验进度 ==========
+def get_verification_progress(batch_id):
+    status = load_verification_status(batch_id)
+    if not status:
+        return {'total': 4, 'completed': 0, 'items': []}
+    items = [
+        {'name': '官方来源已核对', 'key': 'source_verified', 'done': status.get('source_verified', 0)},
+        {'name': '模板版本已核对', 'key': 'template_verified', 'done': status.get('template_verified', 0)},
+        {'name': '规则已人工复核', 'key': 'rule_verified', 'done': status.get('rule_verified', 0)},
+        {'name': '数据已核对', 'key': 'data_verified', 'done': status.get('data_verified', 0)},
+    ]
+    completed = sum(1 for item in items if item['done'])
+    return {'total': len(items), 'completed': completed, 'items': items}
+
 # ========== Streamlit 页面 ==========
 st.set_page_config(page_title="智能报表系统 - 企业版", layout="wide")
 st.title("📋 智能报表系统（企业版）")
@@ -903,7 +995,6 @@ fixed, total = fix_companies_province()
 if fixed > 0:
     st.success(f"✅ 自动修复了 {fixed}/{total} 家公司的省份数据")
 
-# 显示被过滤的异常值提示
 if 'filtered_values' in st.session_state and st.session_state['filtered_values']:
     with st.expander("⚠️ 已过滤的异常数据"):
         for val in st.session_state['filtered_values']:
@@ -944,6 +1035,14 @@ if 'uploaded_files' in st.session_state and st.session_state['uploaded_files']:
             st.session_state['imported_df'] = df
             st.session_state['data_sheet_name'] = selected_sheet
             st.session_state['data_header_row'] = header_row
+            # 保存识别结果
+            st.session_state['data_recognition'] = {
+                'sheets': sheets,
+                'selected_sheet': selected_sheet,
+                'header_row': header_row,
+                'columns': list(df.columns) if df is not None else [],
+                'total_rows': len(df) if df is not None else 0
+            }
             rules = load_rules()
             st.session_state['validation_report'] = validate_data(df, rules)
             st.sidebar.success(f"✅ 已加载: {selected_sheet} (表头行: {header_row+1})")
@@ -999,7 +1098,7 @@ if page == "📊 工作台":
     else:
         st.info("暂无数据，请先导入")
 
-# ===== 数据导入 =====
+# ===== 数据导入（含数据识别） =====
 elif page == "📤 数据导入":
     st.subheader("📤 数据导入（支持多文件）")
     
@@ -1014,46 +1113,72 @@ elif page == "📤 数据导入":
     
     if uploaded_files:
         with st.spinner("正在解析Excel..."):
-            companies, unmapped, all_sheets = parse_multiple_files(uploaded_files)
-            # 过滤掉异常公司（名称无效的已在解析时过滤）
+            companies, unmapped, all_sheets, data_sheet = parse_multiple_files(uploaded_files)
             valid_companies = companies
             if unmapped:
-                st.warning(f"⚠️ 以下城市未在规则库中找到：{', '.join(unmapped)}，将使用全局默认规则，请在规则管理中补充以获得更准确的数据。")
+                st.warning(f"⚠️ 以下城市未在规则库中找到：{', '.join(unmapped)}，将使用全局默认规则")
             if valid_companies:
                 save_companies(valid_companies)
                 st.success(f"成功提取 {len(valid_companies)} 家公司，来自 {len(uploaded_files)} 个文件")
                 st.session_state['uploaded_files'] = uploaded_files
                 st.session_state['all_sheets'] = all_sheets
-                if uploaded_files:
+                # 更新识别结果
+                st.session_state['data_recognition'] = {
+                    'sheets': all_sheets,
+                    'selected_sheet': data_sheet,
+                    'header_row': 1,
+                    'columns': [],
+                    'total_rows': 0,
+                    'files_count': len(uploaded_files),
+                    'companies_extracted': len(valid_companies)
+                }
+                if uploaded_files and data_sheet:
                     first_file = uploaded_files[0]
-                    xls = pd.ExcelFile(first_file)
-                    sheets = xls.sheet_names
-                    default_sheet = None
-                    for kw in ['明细', '月度', '数据', '工资', '社保', '员工', '月报']:
-                        for s in sheets:
-                            if kw in s:
-                                default_sheet = s
-                                break
-                        if default_sheet:
-                            break
-                    if not default_sheet and sheets:
-                        default_sheet = sheets[0]
-                    if default_sheet:
-                        df, header_row = auto_load_sheet_with_header_detection(first_file, default_sheet)
-                        st.session_state['imported_df'] = df
-                        st.session_state['data_sheet_name'] = default_sheet
-                        st.session_state['data_header_row'] = header_row
-                        rules = load_rules()
-                        st.session_state['validation_report'] = validate_data(df, rules)
-                        st.success(f"已自动加载 Sheet「{default_sheet}」（表头行: {header_row+1}），共 {len(df)} 行数据")
-            else:
-                st.warning("未识别到有效公司数据，请检查数据格式")
+                    df, header_row = auto_load_sheet_with_header_detection(first_file, data_sheet)
+                    st.session_state['imported_df'] = df
+                    st.session_state['data_sheet_name'] = data_sheet
+                    st.session_state['data_header_row'] = header_row
+                    st.session_state['data_recognition']['header_row'] = header_row
+                    st.session_state['data_recognition']['columns'] = list(df.columns) if df is not None else []
+                    st.session_state['data_recognition']['total_rows'] = len(df) if df is not None else 0
+                    rules = load_rules()
+                    st.session_state['validation_report'] = validate_data(df, rules)
+                    st.success(f"已自动加载 Sheet「{data_sheet}」（表头行: {header_row+1}），共 {len(df)} 行数据")
     
+    # ===== 数据识别结果展示 =====
+    st.markdown("---")
+    st.subheader("🔍 数据识别结果")
+    if 'data_recognition' in st.session_state:
+        rec = st.session_state['data_recognition']
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("📄 检测到Sheet数", len(rec.get('sheets', [])))
+        with col2:
+            st.metric("📊 当前Sheet", rec.get('selected_sheet', '无'))
+        with col3:
+            st.metric("📋 表头行", rec.get('header_row', 0) + 1 if rec.get('header_row') is not None else 1)
+        with col4:
+            st.metric("🏢 提取公司数", rec.get('companies_extracted', 0))
+        
+        if rec.get('columns'):
+            st.write("**表头字段**")
+            st.dataframe(pd.DataFrame({'字段名': rec['columns']}), use_container_width=True)
+        if rec.get('sheets'):
+            st.write("**所有Sheet**")
+            st.write(", ".join(rec['sheets']))
+        
+        if st.button("🗑️ 清空识别结果", key="clear_recognition"):
+            st.session_state['data_recognition'] = {}
+            st.rerun()
+    else:
+        st.info("请上传文件以查看数据识别结果")
+    
+    # 数据预览
     if 'imported_df' in st.session_state and st.session_state['imported_df'] is not None:
         st.subheader("📊 数据预览")
         df = st.session_state['imported_df']
         st.dataframe(df.head(10), use_container_width=True)
-        st.caption(f"当前Sheet: {st.session_state.get('data_sheet_name', '未知')}，共 {len(df)} 行，表头行: {st.session_state.get('data_header_row', 0)+1}")
+        st.caption(f"当前Sheet: {st.session_state.get('data_sheet_name', '未知')}，共 {len(df)} 行")
         
         if 'validation_report' in st.session_state:
             report = st.session_state['validation_report']
@@ -1074,7 +1199,7 @@ elif page == "📤 数据导入":
             else:
                 st.success("✅ 所有数据校验通过！")
 
-# ===== 依据库管理 =====
+# ===== 依据库管理（增强版） =====
 elif page == "📚 依据库管理":
     st.subheader("📚 依据库管理")
     tab1, tab2, tab3, tab4 = st.tabs(["📄 模板", "⚙️ 规则", "🏢 公司", "📚 来源"])
@@ -1106,13 +1231,133 @@ elif page == "📚 依据库管理":
             st.info("暂无公司数据")
     
     with tab4:
+        st.markdown("**📚 官方来源管理**")
         sources = load_source_registry()
+        
+        # 操作区：新增/编辑
+        with st.expander("➕ 新增官方来源", expanded=False):
+            with st.form(key="add_source_form"):
+                col1, col2 = st.columns(2)
+                with col1:
+                    new_id = st.text_input("来源ID", value=f"src_{str(uuid.uuid4())[:8]}")
+                    new_authority_type = st.selectbox("机构类型", ['social_security', 'tax', 'fund', 'other'])
+                    new_province = st.text_input("省份")
+                    new_city = st.text_input("城市")
+                    new_district = st.text_input("区县")
+                    new_authority_name = st.text_input("机构名称")
+                    new_official_site_name = st.text_input("官网名称")
+                with col2:
+                    new_source_url = st.text_input("来源URL")
+                    new_source_level = st.selectbox("来源级别", ['city', 'province', 'national'])
+                    new_source_section = st.text_input("来源板块")
+                    new_is_official = st.checkbox("官方来源", value=True)
+                    new_crawl_allowed = st.checkbox("允许爬取", value=True)
+                    new_document_name = st.text_input("文档名称")
+                    new_document_version = st.text_input("文档版本")
+                    new_publish_year = st.text_input("发布年份")
+                    new_notes = st.text_area("备注")
+                
+                submitted = st.form_submit_button("保存来源")
+                if submitted:
+                    new_source = {
+                        'id': new_id,
+                        'authority_type': new_authority_type,
+                        'province': new_province,
+                        'city': new_city,
+                        'district': new_district,
+                        'authority_name': new_authority_name,
+                        'official_site_name': new_official_site_name,
+                        'source_url': new_source_url,
+                        'source_level': new_source_level,
+                        'source_section': new_source_section,
+                        'is_official': 1 if new_is_official else 0,
+                        'crawl_allowed': 1 if new_crawl_allowed else 0,
+                        'last_checked': datetime.now().strftime('%Y-%m-%d'),
+                        'status': 'active',
+                        'notes': new_notes,
+                        'document_name': new_document_name,
+                        'document_version': new_document_version,
+                        'publish_year': new_publish_year
+                    }
+                    sources.append(new_source)
+                    save_source_registry(sources)
+                    st.success("来源已添加！")
+                    st.rerun()
+        
+        # 显示来源列表
         if sources:
-            df = pd.DataFrame(sources)
-            cols = ['authority_name', 'province', 'city', 'source_url', 'document_name', 'document_version']
-            st.dataframe(df[cols], use_container_width=True)
+            df_sources = pd.DataFrame(sources)
+            display_cols = ['id', 'authority_type', 'province', 'city', 'authority_name', 'source_url', 'document_name', 'document_version']
+            st.dataframe(df_sources[display_cols], use_container_width=True)
+            
+            # 操作区
+            st.markdown("**操作**")
+            col_ops1, col_ops2 = st.columns(2)
+            with col_ops1:
+                source_to_delete = st.selectbox("选择要删除的来源ID", [s['id'] for s in sources] if sources else [])
+                if st.button("🗑️ 删除所选来源"):
+                    if source_to_delete:
+                        delete_source_by_id(source_to_delete)
+                        st.success(f"已删除来源 {source_to_delete}")
+                        st.rerun()
+            with col_ops2:
+                # 编辑功能：选择来源后加载数据到表单
+                source_to_edit = st.selectbox("选择要编辑的来源ID", [s['id'] for s in sources] if sources else [])
+                if source_to_edit:
+                    with st.expander(f"✏️ 编辑来源 {source_to_edit}", expanded=False):
+                        source = next(s for s in sources if s['id'] == source_to_edit)
+                        with st.form(key="edit_source_form"):
+                            col1, col2 = st.columns(2)
+                            with col1:
+                                edit_authority_type = st.selectbox("机构类型", ['social_security', 'tax', 'fund', 'other'], 
+                                                                  index=['social_security','tax','fund','other'].index(source.get('authority_type','social_security')))
+                                edit_province = st.text_input("省份", value=source.get('province',''))
+                                edit_city = st.text_input("城市", value=source.get('city',''))
+                                edit_district = st.text_input("区县", value=source.get('district',''))
+                                edit_authority_name = st.text_input("机构名称", value=source.get('authority_name',''))
+                                edit_official_site_name = st.text_input("官网名称", value=source.get('official_site_name',''))
+                            with col2:
+                                edit_source_url = st.text_input("来源URL", value=source.get('source_url',''))
+                                edit_source_level = st.selectbox("来源级别", ['city', 'province', 'national'],
+                                                                index=['city','province','national'].index(source.get('source_level','city')))
+                                edit_source_section = st.text_input("来源板块", value=source.get('source_section',''))
+                                edit_is_official = st.checkbox("官方来源", value=bool(source.get('is_official',1)))
+                                edit_crawl_allowed = st.checkbox("允许爬取", value=bool(source.get('crawl_allowed',1)))
+                                edit_document_name = st.text_input("文档名称", value=source.get('document_name',''))
+                                edit_document_version = st.text_input("文档版本", value=source.get('document_version',''))
+                                edit_publish_year = st.text_input("发布年份", value=source.get('publish_year',''))
+                                edit_notes = st.text_area("备注", value=source.get('notes',''))
+                            
+                            submitted_edit = st.form_submit_button("更新来源")
+                            if submitted_edit:
+                                # 更新现有来源
+                                updated_sources = []
+                                for s in sources:
+                                    if s['id'] == source_to_edit:
+                                        s.update({
+                                            'authority_type': edit_authority_type,
+                                            'province': edit_province,
+                                            'city': edit_city,
+                                            'district': edit_district,
+                                            'authority_name': edit_authority_name,
+                                            'official_site_name': edit_official_site_name,
+                                            'source_url': edit_source_url,
+                                            'source_level': edit_source_level,
+                                            'source_section': edit_source_section,
+                                            'is_official': 1 if edit_is_official else 0,
+                                            'crawl_allowed': 1 if edit_crawl_allowed else 0,
+                                            'last_checked': datetime.now().strftime('%Y-%m-%d'),
+                                            'document_name': edit_document_name,
+                                            'document_version': edit_document_version,
+                                            'publish_year': edit_publish_year,
+                                            'notes': edit_notes
+                                        })
+                                    updated_sources.append(s)
+                                save_source_registry(updated_sources)
+                                st.success(f"来源 {source_to_edit} 已更新！")
+                                st.rerun()
         else:
-            st.info("暂无来源，可点击下方初始化样本依据")
+            st.info("暂无来源，请添加或加载样本依据")
         
         if st.button("加载样本依据"):
             sample_sources = [
@@ -1121,21 +1366,30 @@ elif page == "📚 依据库管理":
                  'authority_name': '广州市人力资源和社会保障局',
                  'official_site_name': '广州市人力资源和社会保障局官网',
                  'source_url': 'https://rsj.gz.gov.cn/',
+                 'source_level': 'city', 'source_section': '网上办事',
                  'document_name': '广州市社保年审公告', 'document_version': '2024',
-                 'publish_year': '2024'},
+                 'publish_year': '2024', 'is_official': 1, 'crawl_allowed': 1,
+                 'last_checked': datetime.now().strftime('%Y-%m-%d'), 'status': 'active',
+                 'notes': '来自官方年审文档'},
                 {'id': 'src_sh_social_sample', 'authority_type': 'social_security',
                  'province': '上海', 'city': '上海', 'district': '',
                  'authority_name': '上海市人力资源和社会保障局',
                  'official_site_name': '上海社保官方系统',
                  'source_url': 'https://rsj.sh.gov.cn/',
+                 'source_level': 'city', 'source_section': '网上办事',
                  'document_name': '上海市社保基数调整通知', 'document_version': '2024',
-                 'publish_year': '2024'},
-                {'id': 'src_km_social_sample', 'authority_type': 'social_security',
-                 'province': '云南', 'city': '昆明', 'district': '',
-                 'authority_name': '昆明市人力资源和社会保障局',
-                 'official_site_name': '昆明社保官方系统',
-                 'source_url': '', 'document_name': '昆明市社保年检通知',
-                 'document_version': '2024', 'publish_year': '2024'}
+                 'publish_year': '2024', 'is_official': 1, 'crawl_allowed': 1,
+                 'last_checked': datetime.now().strftime('%Y-%m-%d'), 'status': 'active',
+                 'notes': '来自官方社保数据'},
+                {'id': 'src_hrb_social_sample', 'authority_type': 'social_security',
+                 'province': '黑龙江', 'city': '哈尔滨', 'district': '',
+                 'authority_name': '哈尔滨市人力资源和社会保障局',
+                 'official_site_name': '哈尔滨社保官方系统',
+                 'source_url': '', 'source_level': 'city', 'source_section': '网上办事',
+                 'document_name': '哈尔滨年审公告', 'document_version': '2024',
+                 'publish_year': '2024', 'is_official': 1, 'crawl_allowed': 1,
+                 'last_checked': datetime.now().strftime('%Y-%m-%d'), 'status': 'active',
+                 'notes': '来自哈尔滨年审.rar'}
             ]
             save_source_registry(sample_sources)
             st.success("已加载样本依据！")
@@ -1330,11 +1584,11 @@ elif page == "📄 自定义模板":
         except Exception as e:
             st.error(f"处理模板失败：{e}")
 
-# ===== 导出历史与复核 =====
+# ===== 导出历史与复核（增强版） =====
 elif page == "📋 导出历史与复核":
     st.subheader("📋 导出历史与复核")
     
-    tab1, tab2 = st.tabs(["📋 导出历史", "✅ 复核处理"])
+    tab1, tab2, tab3 = st.tabs(["📋 导出历史", "✅ 复核处理", "📊 核验状态"])
     
     with tab1:
         history = load_export_history()
@@ -1373,6 +1627,92 @@ elif page == "📋 导出历史与复核":
                         st.rerun()
         else:
             st.success("✅ 暂无待复核报表")
+    
+    with tab3:
+        st.markdown("**📊 核验状态**")
+        batches = load_job_batches()
+        if batches:
+            for batch in batches[:10]:
+                batch_id = batch['id']
+                progress = get_verification_progress(batch_id)
+                status = load_verification_status(batch_id)
+                
+                st.markdown(f"**批次：{batch.get('batch_name', batch_id)}**")
+                col1, col2 = st.columns([2, 1])
+                with col1:
+                    # 进度条
+                    st.progress(progress['completed'] / progress['total'] if progress['total'] > 0 else 0)
+                    st.caption(f"{progress['completed']}/{progress['total']} 项已完成")
+                    
+                    # 待处理清单
+                    for item in progress['items']:
+                        icon = "✅" if item['done'] else "❌"
+                        st.write(f"{icon} {item['name']}")
+                
+                with col2:
+                    st.write(f"导出类型：{status.get('export_type', '验证版') if status else '验证版'}")
+                    if status and status.get('reviewer_name'):
+                        st.write(f"复核人：{status['reviewer_name']}")
+                    st.write(f"状态：{'✅ 可导出正式版' if progress['completed'] == progress['total'] else '⏳ 待完成核验'}")
+                    
+                    # 操作按钮
+                    if progress['completed'] == progress['total']:
+                        if st.button(f"📤 导出正式版", key=f"formal_{batch_id}"):
+                            st.success(f"正式版导出成功！批次：{batch.get('batch_name', batch_id)}")
+                    else:
+                        if st.button(f"📤 跳过核验导出验证版", key=f"verify_{batch_id}"):
+                            # 更新为验证版导出
+                            if status:
+                                update_verification_status(batch_id, 'export_type', '验证版')
+                            st.success(f"验证版导出成功！批次：{batch.get('batch_name', batch_id)}")
+                    
+                    # 核验操作（逐项标记完成）
+                    if status:
+                        col_a, col_b = st.columns(2)
+                        with col_a:
+                            if not status.get('source_verified', 0):
+                                if st.button(f"✅ 来源已核对", key=f"src_{batch_id}"):
+                                    update_verification_status(batch_id, 'source_verified', 1)
+                                    st.rerun()
+                            if not status.get('template_verified', 0):
+                                if st.button(f"✅ 模板已核对", key=f"tpl_{batch_id}"):
+                                    update_verification_status(batch_id, 'template_verified', 1)
+                                    st.rerun()
+                        with col_b:
+                            if not status.get('rule_verified', 0):
+                                if st.button(f"✅ 规则已复核", key=f"rule_{batch_id}"):
+                                    update_verification_status(batch_id, 'rule_verified', 1)
+                                    st.rerun()
+                            if not status.get('data_verified', 0):
+                                if st.button(f"✅ 数据已核对", key=f"data_{batch_id}"):
+                                    update_verification_status(batch_id, 'data_verified', 1)
+                                    st.rerun()
+                    
+                    # 设置复核人
+                    with st.form(key=f"reviewer_form_{batch_id}"):
+                        reviewer_name = st.text_input("复核人姓名", value=status.get('reviewer_name', '') if status else '')
+                        if st.form_submit_button("保存复核人"):
+                            if status:
+                                update_verification_status(batch_id, 'reviewer_name', reviewer_name)
+                                st.success("复核人已保存")
+                                st.rerun()
+                            else:
+                                # 创建新的核验状态
+                                save_verification_status({
+                                    'batch_id': batch_id,
+                                    'source_verified': 0,
+                                    'template_verified': 0,
+                                    'rule_verified': 0,
+                                    'data_verified': 0,
+                                    'reviewer_name': reviewer_name,
+                                    'verified_at': datetime.now().isoformat(),
+                                    'export_type': '验证版'
+                                })
+                                st.success("核验状态已创建")
+                                st.rerun()
+                st.markdown("---")
+        else:
+            st.info("暂无批次作业，请先生成报表")
 
 # ===== 备份与恢复 =====
 elif page == "💾 备份与恢复":
@@ -1576,6 +1916,18 @@ else:
                     'review_status': 'pending',
                     'parameters': {'province': province, 'city': city, 'report_type': report_type, 'period': period_label},
                     'created_by': '系统'
+                })
+                
+                # 创建核验状态
+                save_verification_status({
+                    'batch_id': batch_id,
+                    'source_verified': 0,
+                    'template_verified': 0,
+                    'rule_verified': 0,
+                    'data_verified': 0,
+                    'reviewer_name': '',
+                    'verified_at': datetime.now().isoformat(),
+                    'export_type': '验证版'
                 })
                 
                 generated_files = []
