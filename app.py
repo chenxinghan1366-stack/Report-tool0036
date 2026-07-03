@@ -498,7 +498,6 @@ PROVINCE_DEFAULT_RULES = [
     {'city': '南宁', 'province': '广西', 'unit_social': 0.16, 'personal_social': 0.08,
      'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3600, 'social_max': 18000,
      'fund_min': 1800, 'fund_max': 21600, 'source_quote': '南人社发〔2024〕4号'},
-    # ---- 新增襄阳、绵阳（避免遗漏） ----
     {'city': '襄阳', 'province': '湖北', 'unit_social': 0.16, 'personal_social': 0.08,
      'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 0, 'social_max': 999999,
      'fund_min': 0, 'fund_max': 999999, 'source_quote': '系统默认（建议核实）'},
@@ -630,7 +629,7 @@ def apply_custom_template_mapping(wb, data, mapping):
         if field in data:
             ws[cell_ref] = data[field]
 
-# ========== 自动检测表头并读取Sheet ==========
+# ========== 【修改点1】严格表头检测 ==========
 def auto_load_sheet_with_header_detection(file, sheet_name):
     xls = pd.ExcelFile(file)
     df_raw = pd.read_excel(file, sheet_name=sheet_name, header=None)
@@ -638,7 +637,8 @@ def auto_load_sheet_with_header_detection(file, sheet_name):
     header_row = None
     for i, row in df_raw.iterrows():
         row_text = ' '.join([str(v) for v in row.values if pd.notna(v)])
-        if '所属城市' in row_text or '城市' in row_text or '分公司' in row_text or '公司' in row_text:
+        # 必须同时包含"城市"和"公司"或"省份"和"城市"
+        if ('城市' in row_text and '公司' in row_text) or ('省份' in row_text and '城市' in row_text):
             header_row = i
             break
     
@@ -653,7 +653,7 @@ def auto_load_sheet_with_header_detection(file, sheet_name):
         df = df.dropna(how='all')
         return df, 0
 
-# ========== 解析Excel（强制转换为字符串） ==========
+# ========== 解析Excel（过滤非中文城市） ==========
 def parse_uploaded_excel(file):
     xls = pd.ExcelFile(file)
     sheets = xls.sheet_names
@@ -691,11 +691,13 @@ def parse_uploaded_excel(file):
                         district_col = col
                 if city_col and company_col:
                     for _, row in df.iterrows():
-                        # 强制转换为字符串，处理数字或NaN
                         city = str(row[city_col]) if pd.notna(row[city_col]) else ''
                         company = str(row[company_col]) if pd.notna(row[company_col]) else ''
                         district = str(row[district_col]) if district_col and pd.notna(row[district_col]) else ''
                         if city and company:
+                            # 【修改点2】过滤非中文城市（如纯数字、英文等）
+                            if not re.match(r'^[\u4e00-\u9fa5]{2,}', city):
+                                continue  # 跳过该行
                             norm_city = normalize_name(city)
                             province = city_province_map.get(norm_city, '')
                             if not province:
@@ -832,7 +834,6 @@ def get_rule_for_city(city, province=None):
         norm_prov = normalize_name(province)
         for r in rules:
             if normalize_name(r.get('province', '')) == norm_prov:
-                # 返回该省份第一个匹配规则的副本，标记来源
                 fallback = r.copy()
                 fallback['source_quote'] = f"省份默认（{province}）"
                 return fallback
@@ -980,8 +981,8 @@ elif page == "📤 数据导入":
         with st.spinner("正在解析Excel..."):
             companies, unmapped, all_sheets = parse_multiple_files(uploaded_files)
             if companies:
-                # 不再丢弃省份为空的记录，而是保留并显示警告
-                valid_companies = companies  # 全部保留
+                # 全部保留，包括省份为空的
+                valid_companies = companies
                 if unmapped:
                     st.warning(f"⚠️ 以下城市未在规则库中找到：{', '.join(unmapped)}，将使用全局默认规则，请在规则管理中补充以获得更准确的数据。")
                 save_companies(valid_companies)
@@ -1552,7 +1553,6 @@ else:
                     try:
                         rule = get_rule_for_city(comp['city'], comp.get('province'))
                         if rule is None:
-                            # 如果还未有规则，使用全局默认（实际上 get_rule_for_city 已保证非 None）
                             rule = {
                                 'unit_social': 0.16,
                                 'personal_social': 0.08,
