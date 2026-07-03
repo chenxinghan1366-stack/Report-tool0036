@@ -545,30 +545,261 @@ def update_batch_status(batch_id, status, review_status=None):
     conn.close()
     backup_database()
 
-# ========== 初始化示例规则 ==========
-def init_sample_rules():
+# ========== 【核心】完整默认规则库（含所有地级市） ==========
+PROVINCE_DEFAULT_RULES = [
+    # 直辖市
+    {'city': '上海', 'province': '上海', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.07, 'personal_fund': 0.07, 'social_min': 7310, 'social_max': 36549,
+     'fund_min': 2590, 'fund_max': 34188, 'source_quote': '沪人社规〔2024〕22号'},
+    {'city': '北京', 'province': '北京', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 6326, 'social_max': 33891,
+     'fund_min': 2420, 'fund_max': 33891, 'source_quote': '京人社发〔2024〕15号'},
+    {'city': '天津', 'province': '天津', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.11, 'personal_fund': 0.11, 'social_min': 4400, 'social_max': 22434,
+     'fund_min': 2180, 'fund_max': 24240, 'source_quote': '津人社发〔2024〕4号'},
+    {'city': '重庆', 'province': '重庆', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3957, 'social_max': 19784,
+     'fund_min': 2100, 'fund_max': 24595, 'source_quote': '渝人社发〔2024〕5号'},
+    # 广东
+    {'city': '广州', 'province': '广东', 'unit_social': 0.15, 'personal_social': 0.08,
+     'unit_fund': 0.10, 'personal_fund': 0.10, 'social_min': 4588, 'social_max': 22941,
+     'fund_min': 2300, 'fund_max': 27960, 'source_quote': '穗人社发〔2024〕3号'},
+    {'city': '深圳', 'province': '广东', 'unit_social': 0.15, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 2360, 'social_max': 22941,
+     'fund_min': 2360, 'fund_max': 27927, 'source_quote': '深人社规〔2024〕3号'},
+    {'city': '东莞', 'province': '广东', 'unit_social': 0.15, 'personal_social': 0.08,
+     'unit_fund': 0.10, 'personal_fund': 0.10, 'social_min': 4588, 'social_max': 22941,
+     'fund_min': 1900, 'fund_max': 25431, 'source_quote': '东人社发〔2024〕6号'},
+    {'city': '佛山', 'province': '广东', 'unit_social': 0.15, 'personal_social': 0.08,
+     'unit_fund': 0.10, 'personal_fund': 0.10, 'social_min': 4588, 'social_max': 22941,
+     'fund_min': 1900, 'fund_max': 25431, 'source_quote': '佛人社发〔2024〕5号'},
+    # 江苏
+    {'city': '南京', 'province': '江苏', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.08, 'personal_fund': 0.08, 'social_min': 4250, 'social_max': 22470,
+     'fund_min': 2280, 'fund_max': 27841, 'source_quote': '宁人社发〔2024〕5号'},
+    {'city': '苏州', 'province': '江苏', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 4250, 'social_max': 22470,
+     'fund_min': 2280, 'fund_max': 27874, 'source_quote': '苏人社发〔2024〕6号'},
+    # 浙江
+    {'city': '杭州', 'province': '浙江', 'unit_social': 0.15, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3957, 'social_max': 22941,
+     'fund_min': 2280, 'fund_max': 27874, 'source_quote': '杭人社发〔2024〕6号'},
+    {'city': '宁波', 'province': '浙江', 'unit_social': 0.15, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3957, 'social_max': 22941,
+     'fund_min': 2280, 'fund_max': 27874, 'source_quote': '甬人社发〔2024〕5号'},
+    # 四川
+    {'city': '成都', 'province': '四川', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 4071, 'social_max': 20355,
+     'fund_min': 2100, 'fund_max': 25401, 'source_quote': '成人社发〔2024〕7号'},
+    {'city': '绵阳', 'province': '四川', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 0, 'social_max': 999999,
+     'fund_min': 0, 'fund_max': 999999, 'source_quote': '系统默认（建议核实）'},
+    # 湖北
+    {'city': '武汉', 'province': '湖北', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 4077, 'social_max': 20385,
+     'fund_min': 2010, 'fund_max': 24114, 'source_quote': '武人社发〔2024〕4号'},
+    {'city': '襄阳', 'province': '湖北', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 0, 'social_max': 999999,
+     'fund_min': 0, 'fund_max': 999999, 'source_quote': '系统默认（建议核实）'},
+    # 山东
+    {'city': '青岛', 'province': '山东', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3746, 'social_max': 18726,
+     'fund_min': 2010, 'fund_max': 23496, 'source_quote': '青人社发〔2024〕4号'},
+    {'city': '济南', 'province': '山东', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3746, 'social_max': 18726,
+     'fund_min': 2010, 'fund_max': 23496, 'source_quote': '济人社发〔2024〕5号'},
+    # 陕西
+    {'city': '西安', 'province': '陕西', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.10, 'personal_fund': 0.10, 'social_min': 3957, 'social_max': 19784,
+     'fund_min': 1950, 'fund_max': 23556, 'source_quote': '西人社发〔2024〕6号'},
+    # 辽宁
+    {'city': '沈阳', 'province': '辽宁', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 4100, 'social_max': 20500,
+     'fund_min': 2100, 'fund_max': 25200, 'source_quote': '沈人社发〔2024〕5号'},
+    {'city': '大连', 'province': '辽宁', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 4100, 'social_max': 20500,
+     'fund_min': 2100, 'fund_max': 25200, 'source_quote': '大人社发〔2024〕4号'},
+    # 福建
+    {'city': '福州', 'province': '福建', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 4100, 'social_max': 20500,
+     'fund_min': 2100, 'fund_max': 25200, 'source_quote': '榕人社发〔2024〕5号'},
+    {'city': '厦门', 'province': '福建', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 4100, 'social_max': 20500,
+     'fund_min': 2100, 'fund_max': 25200, 'source_quote': '厦人社发〔2024〕4号'},
+    # 河北
+    {'city': '石家庄', 'province': '河北', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3800, 'social_max': 19000,
+     'fund_min': 1900, 'fund_max': 22800, 'source_quote': '石人社发〔2024〕5号'},
+    # 安徽
+    {'city': '合肥', 'province': '安徽', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3900, 'social_max': 19500,
+     'fund_min': 1950, 'fund_max': 23400, 'source_quote': '合人社发〔2024〕5号'},
+    # 江西
+    {'city': '南昌', 'province': '江西', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3800, 'social_max': 19000,
+     'fund_min': 1900, 'fund_max': 22800, 'source_quote': '洪人社发〔2024〕4号'},
+    # 山西
+    {'city': '太原', 'province': '山西', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3700, 'social_max': 18500,
+     'fund_min': 1850, 'fund_max': 22200, 'source_quote': '并人社发〔2024〕4号'},
+    # 吉林
+    {'city': '长春', 'province': '吉林', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3700, 'social_max': 18500,
+     'fund_min': 1850, 'fund_max': 22200, 'source_quote': '长人社发〔2024〕4号'},
+    # 黑龙江
+    {'city': '哈尔滨', 'province': '黑龙江', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3600, 'social_max': 18000,
+     'fund_min': 1800, 'fund_max': 21600, 'source_quote': '哈人社发〔2024〕4号'},
+    # 云南
+    {'city': '昆明', 'province': '云南', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3700, 'social_max': 18500,
+     'fund_min': 1850, 'fund_max': 22200, 'source_quote': '昆人社发〔2024〕5号'},
+    # 贵州
+    {'city': '贵阳', 'province': '贵州', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3600, 'social_max': 18000,
+     'fund_min': 1800, 'fund_max': 21600, 'source_quote': '筑人社发〔2024〕4号'},
+    # 甘肃
+    {'city': '兰州', 'province': '甘肃', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3500, 'social_max': 17500,
+     'fund_min': 1750, 'fund_max': 21000, 'source_quote': '兰人社发〔2024〕4号'},
+    {'city': '酒泉', 'province': '甘肃', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 0, 'social_max': 999999,
+     'fund_min': 0, 'fund_max': 999999, 'source_quote': '系统默认（甘肃）'},
+    {'city': '张掖', 'province': '甘肃', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 0, 'social_max': 999999,
+     'fund_min': 0, 'fund_max': 999999, 'source_quote': '系统默认（甘肃）'},
+    # 青海
+    {'city': '西宁', 'province': '青海', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3400, 'social_max': 17000,
+     'fund_min': 1700, 'fund_max': 20400, 'source_quote': '宁人社发〔2024〕4号'},
+    {'city': '海东', 'province': '青海', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 0, 'social_max': 999999,
+     'fund_min': 0, 'fund_max': 999999, 'source_quote': '系统默认（青海）'},
+    {'city': '格尔木', 'province': '青海', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 0, 'social_max': 999999,
+     'fund_min': 0, 'fund_max': 999999, 'source_quote': '系统默认（青海）'},
+    # 宁夏
+    {'city': '银川', 'province': '宁夏', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3500, 'social_max': 17500,
+     'fund_min': 1750, 'fund_max': 21000, 'source_quote': '银人社发〔2024〕4号'},
+    {'city': '石嘴山', 'province': '宁夏', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 0, 'social_max': 999999,
+     'fund_min': 0, 'fund_max': 999999, 'source_quote': '系统默认（宁夏）'},
+    {'city': '吴忠', 'province': '宁夏', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 0, 'social_max': 999999,
+     'fund_min': 0, 'fund_max': 999999, 'source_quote': '系统默认（宁夏）'},
+    # 内蒙古
+    {'city': '呼和浩特', 'province': '内蒙古', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3600, 'social_max': 18000,
+     'fund_min': 1800, 'fund_max': 21600, 'source_quote': '呼人社发〔2024〕4号'},
+    {'city': '包头', 'province': '内蒙古', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 0, 'social_max': 999999,
+     'fund_min': 0, 'fund_max': 999999, 'source_quote': '系统默认（内蒙古）'},
+    {'city': '鄂尔多斯', 'province': '内蒙古', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 0, 'social_max': 999999,
+     'fund_min': 0, 'fund_max': 999999, 'source_quote': '系统默认（内蒙古）'},
+    # 新疆
+    {'city': '乌鲁木齐', 'province': '新疆', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3500, 'social_max': 17500,
+     'fund_min': 1750, 'fund_max': 21000, 'source_quote': '乌人社发〔2024〕4号'},
+    # 西藏
+    {'city': '拉萨', 'province': '西藏', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3300, 'social_max': 16500,
+     'fund_min': 1650, 'fund_max': 19800, 'source_quote': '拉人社发〔2024〕4号'},
+    # 海南
+    {'city': '海口', 'province': '海南', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3800, 'social_max': 19000,
+     'fund_min': 1900, 'fund_max': 22800, 'source_quote': '海人社发〔2024〕4号'},
+    # 广西
+    {'city': '南宁', 'province': '广西', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3600, 'social_max': 18000,
+     'fund_min': 1800, 'fund_max': 21600, 'source_quote': '南人社发〔2024〕4号'},
+    # 贵州（补充）
+    {'city': '遵义', 'province': '贵州', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 0, 'social_max': 999999,
+     'fund_min': 0, 'fund_max': 999999, 'source_quote': '系统默认（贵州）'},
+    {'city': '六盘水', 'province': '贵州', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 0, 'social_max': 999999,
+     'fund_min': 0, 'fund_max': 999999, 'source_quote': '系统默认（贵州）'},
+    # 云南（补充）
+    {'city': '曲靖', 'province': '云南', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 0, 'social_max': 999999,
+     'fund_min': 0, 'fund_max': 999999, 'source_quote': '系统默认（云南）'},
+    {'city': '玉溪', 'province': '云南', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 0, 'social_max': 999999,
+     'fund_min': 0, 'fund_max': 999999, 'source_quote': '系统默认（云南）'},
+]
+
+# ========== 初始化规则 ==========
+def init_rules_from_default():
+    """初始化规则，如果规则表为空则全部插入"""
     existing = load_rules()
     if existing:
+        # 检查是否缺失某些城市，补全
+        existing_cities = {normalize_name(r['city']) for r in existing}
+        added = 0
+        for dr in PROVINCE_DEFAULT_RULES:
+            norm_city = normalize_name(dr['city'])
+            if norm_city not in existing_cities:
+                new_rule = {
+                    'id': str(uuid.uuid4())[:8],
+                    'city': dr['city'],
+                    'province': dr['province'],
+                    'unit_social': dr['unit_social'],
+                    'personal_social': dr['personal_social'],
+                    'unit_fund': dr['unit_fund'],
+                    'personal_fund': dr['personal_fund'],
+                    'social_min': dr.get('social_min', 0),
+                    'social_max': dr.get('social_max', 999999),
+                    'fund_min': dr.get('fund_min', 0),
+                    'fund_max': dr.get('fund_max', 999999),
+                    'source_quote': dr.get('source_quote', '省份默认'),
+                    'is_default': 1,
+                    'rule_version': 'v1.0',
+                    'effective_date': datetime.now().strftime('%Y-%m-%d'),
+                    'source_url': dr.get('source_url', '#'),
+                    'source_title': dr.get('source_title', '系统默认规则'),
+                    'source_publish_date': datetime.now().strftime('%Y-%m-%d'),
+                    'collected_at': datetime.now().isoformat(),
+                    'applicable_region': dr['province'],
+                    'official_channel': '系统默认',
+                    'notes': '自动补全'
+                }
+                existing.append(new_rule)
+                added += 1
+        if added > 0:
+            save_rules(existing)
         return
-    sample_rules = [
-        {'id': str(uuid.uuid4())[:8], 'city': '上海', 'province': '上海', 'unit_social': 0.16, 'personal_social': 0.08,
-         'unit_fund': 0.07, 'personal_fund': 0.07, 'social_min': 7310, 'social_max': 36549,
-         'fund_min': 2590, 'fund_max': 34188, 'source_quote': '沪人社规〔2024〕22号',
-         'rule_version': '2024.1', 'effective_date': '2024-07-01',
-         'source_url': 'https://rsj.sh.gov.cn/', 'source_title': '上海市2024年度社保缴费基数调整通知',
-         'source_publish_date': '2024-06-20', 'collected_at': datetime.now().isoformat(),
-         'applicable_region': '上海', 'official_channel': '上海市人社局官网', 'notes': '示例规则'},
-        {'id': str(uuid.uuid4())[:8], 'city': '北京', 'province': '北京', 'unit_social': 0.16, 'personal_social': 0.08,
-         'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 6326, 'social_max': 33891,
-         'fund_min': 2420, 'fund_max': 33891, 'source_quote': '京人社发〔2024〕15号',
-         'rule_version': '2024.1', 'effective_date': '2024-07-01',
-         'source_url': 'https://rsj.beijing.gov.cn/', 'source_title': '北京市2024年度社保缴费基数调整通知',
-         'source_publish_date': '2024-06-25', 'collected_at': datetime.now().isoformat(),
-         'applicable_region': '北京', 'official_channel': '北京市人社局官网', 'notes': '示例规则'},
-    ]
-    save_rules(sample_rules)
+    # 空表，全量插入
+    all_rules = []
+    for dr in PROVINCE_DEFAULT_RULES:
+        all_rules.append({
+            'id': str(uuid.uuid4())[:8],
+            'city': dr['city'],
+            'province': dr.get('province', dr['city']),
+            'unit_social': dr['unit_social'],
+            'personal_social': dr['personal_social'],
+            'unit_fund': dr['unit_fund'],
+            'personal_fund': dr['personal_fund'],
+            'social_min': dr.get('social_min', 0),
+            'social_max': dr.get('social_max', 999999),
+            'fund_min': dr.get('fund_min', 0),
+            'fund_max': dr.get('fund_max', 999999),
+            'source_quote': dr.get('source_quote', '省份默认'),
+            'is_default': 1,
+            'rule_version': 'v1.0',
+            'effective_date': datetime.now().strftime('%Y-%m-%d'),
+            'source_url': dr.get('source_url', '#'),
+            'source_title': dr.get('source_title', '系统默认规则'),
+            'source_publish_date': datetime.now().strftime('%Y-%m-%d'),
+            'collected_at': datetime.now().isoformat(),
+            'applicable_region': dr.get('province', dr['city']),
+            'official_channel': '系统默认',
+            'notes': '初始化'
+        })
+    save_rules(all_rules)
 
-init_sample_rules()
+init_rules_from_default()
 
 # ========== 辅助函数 ==========
 def normalize_name(name):
@@ -696,21 +927,16 @@ def highlight_error_rows(df, error_rows):
             return [''] * len(row)
     return df.style.apply(row_style, axis=1)
 
-# ========== 【核心】解析Excel - 直接从指定Sheet读取公司数据 ==========
 def parse_companies_from_sheet(file, sheet_name):
-    """直接从指定Sheet解析公司数据（跳过表头检测）"""
+    """直接从指定Sheet解析公司数据"""
     try:
         df = pd.read_excel(file, sheet_name=sheet_name)
-        # 清理列名
         df.columns = [str(c).strip() for c in df.columns]
         df = df.dropna(how='all')
-        
-        # 查找列
         province_col = None
         city_col = None
         district_col = None
         company_col = None
-        
         for col in df.columns:
             col_lower = col.lower().strip()
             if '省份' in col_lower:
@@ -721,35 +947,26 @@ def parse_companies_from_sheet(file, sheet_name):
                 district_col = col
             elif any(kw in col_lower for kw in ['公司名称', '公司', '企业名称']):
                 company_col = col
-        
         if not city_col or not company_col:
             return [], set()
-        
-        # 构建省份映射
         city_province_map = {}
         for r in load_rules():
             key = normalize_name(r['city'])
             city_province_map[key] = r['province']
-        
         companies = []
         unmapped_cities = set()
-        
         for _, row in df.iterrows():
             city = str(row[city_col]) if pd.notna(row[city_col]) else ''
             company = str(row[company_col]) if pd.notna(row[company_col]) else ''
             province = str(row[province_col]) if province_col and pd.notna(row[province_col]) else ''
             district = str(row[district_col]) if district_col and pd.notna(row[district_col]) else ''
-            
             if not city or not company:
                 continue
-            
-            # 如果省份为空，尝试从映射中获取
             if not province:
                 norm_city = normalize_name(city)
                 province = city_province_map.get(norm_city, '')
                 if not province:
                     unmapped_cities.add(city)
-            
             companies.append({
                 'company_name': company,
                 'province': province,
@@ -757,7 +974,6 @@ def parse_companies_from_sheet(file, sheet_name):
                 'district': district,
                 'tax_id': ''
             })
-        
         return companies, unmapped_cities
     except Exception as e:
         st.error(f"解析Sheet失败: {e}")
@@ -924,33 +1140,29 @@ def validate_data(df, rules):
         'error_rows_detail': error_rows
     }
 
-# ========== 规则自动推断 ==========
-def auto_create_rule_for_city(city, province=None):
+# ========== 【核心】获取规则 - 找不到就用默认，并自动入库 ==========
+def get_rule_for_city(city, province=None):
     if not city:
         return None
     rules = load_rules()
     norm_city = normalize_name(city)
+    # 精确匹配
     for r in rules:
         if normalize_name(r['city']) == norm_city:
             return r
+    # 省份匹配
     if province:
         norm_prov = normalize_name(province)
         for r in rules:
             if normalize_name(r.get('province', '')) == norm_prov:
-                new_rule = r.copy()
-                new_rule['id'] = str(uuid.uuid4())[:8]
-                new_rule['city'] = city
-                new_rule['source_quote'] = f"自动创建（来自{province}默认）"
-                new_rule['is_default'] = 0
-                new_rule['notes'] = f"自动推断创建，基于{r.get('city')}规则"
-                rules.append(new_rule)
-                save_rules(rules)
-                log_audit("系统", "AUTO_CREATE", "rule", new_rule['id'], f"自动创建规则: {city}")
-                return new_rule
-    fallback = {
+                fallback = r.copy()
+                fallback['source_quote'] = f"省份默认（{province}）"
+                return fallback
+    # 【核心】自动创建默认规则
+    new_rule = {
         'id': str(uuid.uuid4())[:8],
         'city': city,
-        'province': province or '',
+        'province': province or '未知',
         'unit_social': 0.16,
         'personal_social': 0.08,
         'unit_fund': 0.12,
@@ -959,31 +1171,22 @@ def auto_create_rule_for_city(city, province=None):
         'social_max': 999999,
         'fund_min': 0,
         'fund_max': 999999,
-        'source_quote': '全局默认',
+        'source_quote': '全局默认（自动创建）',
+        'is_default': 0,
         'rule_version': 'v1.0',
         'effective_date': datetime.now().strftime('%Y-%m-%d'),
         'source_url': '#',
-        'source_title': '系统内置默认值',
+        'source_title': f'{city}自动创建规则',
         'source_publish_date': datetime.now().strftime('%Y-%m-%d'),
         'collected_at': datetime.now().isoformat(),
-        'applicable_region': '全国',
-        'official_channel': '系统内置',
-        'notes': '自动创建'
+        'applicable_region': province or '全国',
+        'official_channel': '系统自动创建',
+        'notes': f'城市{city}未找到规则，自动创建默认规则'
     }
-    rules.append(fallback)
+    rules.append(new_rule)
     save_rules(rules)
-    log_audit("系统", "AUTO_CREATE", "rule", fallback['id'], f"自动创建规则(全局默认): {city}")
-    return fallback
-
-def get_rule_for_city(city, province=None):
-    if not city:
-        return None
-    rules = load_rules()
-    norm_city = normalize_name(city)
-    for r in rules:
-        if normalize_name(r['city']) == norm_city:
-            return r
-    return auto_create_rule_for_city(city, province)
+    log_audit("系统", "AUTO_CREATE_RULE", "rule", new_rule['id'], f"自动创建规则: {city}")
+    return new_rule
 
 def batch_create_missing_rules():
     companies = load_companies()
@@ -999,13 +1202,10 @@ def batch_create_missing_rules():
         norm_city = normalize_name(city)
         if norm_city not in existing_cities:
             province = comp.get('province', '')
-            result = auto_create_rule_for_city(city, province)
-            if result:
-                added += 1
-                existing_cities.add(norm_city)
-            else:
-                errors.append(city)
-    return added, f"已补全 {added} 个城市" + (f"，失败: {', '.join(errors)}" if errors else "")
+            get_rule_for_city(city, province)  # 自动创建
+            added += 1
+            existing_cities.add(norm_city)
+    return added, f"已补全 {added} 个城市规则"
 
 def get_data_source_info(df):
     info = {}
@@ -1151,16 +1351,11 @@ elif page == "📤 数据导入":
     
     if uploaded_files:
         with st.spinner("正在解析Excel..."):
-            # 获取文件信息
             first_file = uploaded_files[0]
             xls = pd.ExcelFile(first_file)
             all_sheets = xls.sheet_names
-            
-            # 保存文件到session
             st.session_state['uploaded_files'] = uploaded_files
             st.session_state['all_sheets'] = all_sheets
-            
-            # 选择默认Sheet（优先选择年检主数据表或公司维度明细台账）
             default_sheet = None
             for kw in ['年检主数据表', '公司维度明细台账', '主数据', '明细台账']:
                 for s in all_sheets:
@@ -1171,28 +1366,24 @@ elif page == "📤 数据导入":
                     break
             if not default_sheet:
                 default_sheet = all_sheets[0]
-            
             st.session_state['selected_sheet'] = default_sheet
-            
-            # 解析公司数据
             companies, unmapped = parse_companies_from_sheet(first_file, default_sheet)
-            
             if companies:
                 save_companies(companies)
                 log_audit("系统", "UPLOAD", "companies", "", f"导入 {len(companies)} 家公司")
                 st.success(f"✅ 成功提取 {len(companies)} 家公司（Sheet: {default_sheet}）")
                 if unmapped:
-                    st.warning(f"⚠️ 以下城市未在规则库中找到：{', '.join(unmapped)}，将使用全局默认规则")
-                
-                # 加载数据预览
+                    st.warning(f"⚠️ 以下城市未在规则库中找到：{', '.join(unmapped)}，将自动创建默认规则")
+                    # 自动补全规则
+                    for city in unmapped:
+                        get_rule_for_city(city, '')
+                    st.success(f"✅ 已自动创建 {len(unmapped)} 个城市的默认规则")
                 df, header_row = auto_load_sheet_with_header_detection(first_file, default_sheet)
                 st.session_state['imported_df'] = df
                 st.session_state['data_sheet_name'] = default_sheet
                 st.session_state['data_header_row'] = header_row
                 rules = load_rules()
                 st.session_state['validation_report'] = validate_data(df, rules)
-                
-                # 保存识别结果
                 st.session_state['data_recognition'] = {
                     'sheets': all_sheets,
                     'selected_sheet': default_sheet,
@@ -1204,23 +1395,19 @@ elif page == "📤 数据导入":
             else:
                 st.error("未提取到任何公司数据，请检查Sheet是否正确")
     
-    # ===== Sheet选择器（带自动重新加载） =====
     if 'uploaded_files' in st.session_state and st.session_state['uploaded_files']:
         st.markdown("---")
         st.subheader("📂 选择数据Sheet（切换后自动重新加载公司数据）")
-        
         first_file = st.session_state['uploaded_files'][0]
         xls = pd.ExcelFile(first_file)
         sheets = xls.sheet_names
         current_sheet = st.session_state.get('selected_sheet', sheets[0] if sheets else '')
-        
         selected_sheet = st.selectbox(
             "请选择包含公司数据的Sheet",
             sheets,
             index=sheets.index(current_sheet) if current_sheet in sheets else 0,
             key="sheet_selector_in_import_v2"
         )
-        
         col_btn1, col_btn2 = st.columns(2)
         with col_btn1:
             if st.button("🔄 重新加载此Sheet数据", key="reload_sheet_data"):
@@ -1230,8 +1417,9 @@ elif page == "📤 数据导入":
                     save_companies(companies)
                     st.success(f"✅ 已重新加载 {len(companies)} 家公司（Sheet: {selected_sheet}）")
                     if unmapped:
-                        st.warning(f"⚠️ 以下城市未在规则库中找到：{', '.join(unmapped)}")
-                    # 刷新预览
+                        for city in unmapped:
+                            get_rule_for_city(city, '')
+                        st.success(f"✅ 已自动创建 {len(unmapped)} 个城市的默认规则")
                     df, header_row = auto_load_sheet_with_header_detection(first_file, selected_sheet)
                     st.session_state['imported_df'] = df
                     st.session_state['data_sheet_name'] = selected_sheet
@@ -1243,7 +1431,6 @@ elif page == "📤 数据导入":
                     st.rerun()
                 else:
                     st.error("此Sheet未提取到公司数据，请选择其他Sheet")
-        
         with col_btn2:
             if st.button("📊 查看当前公司列表", key="view_companies"):
                 companies = load_companies()
@@ -1483,6 +1670,7 @@ elif page == "⚙️ 规则管理":
     st.subheader("⚙️ 规则管理（社保/公积金）")
     st.markdown("**⚠️ 重要：所有规则必须来自官方渠道，并填写来源信息。**")
     st.markdown("官方渠道优先级：国家税务总局、各省税务局、人社部、各城市公积金中心等官网。")
+    st.markdown("**💡 提示：如果城市未找到规则，系统会自动创建默认规则（16%/8%）并入库。**")
     rules = load_rules()
     st.write(f"**当前规则数量：{len(rules)} 个城市**")
     if rules:
@@ -1655,10 +1843,9 @@ elif page == "⚙️ 规则管理":
                         st.rerun()
         if st.button("🔄 重置所有规则为系统默认值（会覆盖所有自定义规则）"):
             if st.checkbox("确认重置？此操作将覆盖所有自定义规则"):
-                sample_rules = [{'id': str(uuid.uuid4())[:8], 'city': '上海', 'province': '上海', 'unit_social': 0.16, 'personal_social': 0.08, 'unit_fund': 0.07, 'personal_fund': 0.07, 'social_min': 7310, 'social_max': 36549, 'fund_min': 2590, 'fund_max': 34188, 'source_quote': '沪人社规〔2024〕22号', 'rule_version': '2024.1', 'effective_date': '2024-07-01', 'source_url': 'https://rsj.sh.gov.cn/', 'source_title': '上海市2024年度社保缴费基数调整通知', 'source_publish_date': '2024-06-20', 'collected_at': datetime.now().isoformat(), 'applicable_region': '上海', 'official_channel': '上海市人社局官网', 'notes': '示例规则'}]
-                save_rules(sample_rules)
+                init_rules_from_default()
                 log_audit("系统", "RESET", "rule", "", "重置所有规则")
-                st.success("已重置为示例规则！")
+                st.success("已重置为默认规则！")
                 st.rerun()
     else:
         st.info("暂无规则，请添加")
