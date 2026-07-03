@@ -545,6 +545,15 @@ def update_batch_status(batch_id, status, review_status=None):
     conn.close()
     backup_database()
 
+# ========== 【修复】normalize_name 提前定义 ==========
+def normalize_name(name):
+    if not name:
+        return name
+    for suffix in ['省', '市', '区', '县', '自治区', '特别行政区', '自治州', '地区']:
+        if name.endswith(suffix):
+            name = name[:-len(suffix)]
+    return name.strip()
+
 # ========== 【核心】完整默认规则库（含所有地级市） ==========
 PROVINCE_DEFAULT_RULES = [
     # 直辖市
@@ -802,14 +811,6 @@ def init_rules_from_default():
 init_rules_from_default()
 
 # ========== 辅助函数 ==========
-def normalize_name(name):
-    if not name:
-        return name
-    for suffix in ['省', '市', '区', '县', '自治区', '特别行政区', '自治州', '地区']:
-        if name.endswith(suffix):
-            name = name[:-len(suffix)]
-    return name.strip()
-
 def match_template_with_details(province, city, district, report_type):
     templates = load_templates()
     if not templates:
@@ -1374,7 +1375,6 @@ elif page == "📤 数据导入":
                 st.success(f"✅ 成功提取 {len(companies)} 家公司（Sheet: {default_sheet}）")
                 if unmapped:
                     st.warning(f"⚠️ 以下城市未在规则库中找到：{', '.join(unmapped)}，将自动创建默认规则")
-                    # 自动补全规则
                     for city in unmapped:
                         get_rule_for_city(city, '')
                     st.success(f"✅ 已自动创建 {len(unmapped)} 个城市的默认规则")
