@@ -629,7 +629,7 @@ def apply_custom_template_mapping(wb, data, mapping):
         if field in data:
             ws[cell_ref] = data[field]
 
-# ========== 【修改点1】严格表头检测 ==========
+# ========== 自动检测表头并读取Sheet（修复版） ==========
 def auto_load_sheet_with_header_detection(file, sheet_name):
     xls = pd.ExcelFile(file)
     df_raw = pd.read_excel(file, sheet_name=sheet_name, header=None)
@@ -637,7 +637,7 @@ def auto_load_sheet_with_header_detection(file, sheet_name):
     header_row = None
     for i, row in df_raw.iterrows():
         row_text = ' '.join([str(v) for v in row.values if pd.notna(v)])
-        # 必须同时包含"城市"和"公司"或"省份"和"城市"
+        # 更严格的检测：必须同时包含"城市"和"公司"或"省份"
         if ('城市' in row_text and '公司' in row_text) or ('省份' in row_text and '城市' in row_text):
             header_row = i
             break
@@ -653,12 +653,30 @@ def auto_load_sheet_with_header_detection(file, sheet_name):
         df = df.dropna(how='all')
         return df, 0
 
-# ========== 解析Excel（过滤非中文城市） ==========
+# ========== 判断是否为有效中文名称 ==========
+def is_valid_chinese_name(text):
+    """判断文本是否为有效的中文名称（至少包含2个中文字符）"""
+    if not text or not isinstance(text, str):
+        return False
+    # 至少包含2个中文字符
+    chinese_chars = re.findall(r'[\u4e00-\u9fa5]', text)
+    return len(chinese_chars) >= 2
+
+def is_valid_city_name(text):
+    """判断是否为有效的城市名（至少包含2个中文字符）"""
+    if not text or not isinstance(text, str):
+        return False
+    chinese_chars = re.findall(r'[\u4e00-\u9fa5]', text)
+    return len(chinese_chars) >= 2
+
+# ========== 解析Excel（过滤异常数据） ==========
 def parse_uploaded_excel(file):
     xls = pd.ExcelFile(file)
     sheets = xls.sheet_names
     all_companies = []
     unmapped_cities = set()
+    filtered_values = []  # 记录被过滤的异常值
+    
     city_province_map = {}
     for dr in PROVINCE_DEFAULT_RULES:
         key = normalize_name(dr['city'])
@@ -694,10 +712,19 @@ def parse_uploaded_excel(file):
                         city = str(row[city_col]) if pd.notna(row[city_col]) else ''
                         company = str(row[company_col]) if pd.notna(row[company_col]) else ''
                         district = str(row[district_col]) if district_col and pd.notna(row[district_col]) else ''
+                        
+                        # ---- 过滤异常数据 ----
+                        # 1. 城市必须是有效中文名称
+                        if city and not is_valid_city_name(city):
+                            filtered_values.append(f"城市无效: {city}")
+                            continue
+                        
+                        # 2. 公司名称必须是有效中文名称（至少包含2个中文字符）
+                        if company and not is_valid_chinese_name(company):
+                            filtered_values.append(f"公司名称无效: {company}")
+                            continue
+                        
                         if city and company:
-                            # 【修改点2】过滤非中文城市（如纯数字、英文等）
-                            if not re.match(r'^[\u4e00-\u9fa5]{2,}', city):
-                                continue  # 跳过该行
                             norm_city = normalize_name(city)
                             province = city_province_map.get(norm_city, '')
                             if not province:
@@ -712,6 +739,11 @@ def parse_uploaded_excel(file):
         except Exception as e:
             st.error(f"解析Sheet {sheet} 时出错：{e}")
             continue
+    
+    # 如果有过滤掉的异常值，在session中记录以便显示
+    if filtered_values:
+        st.session_state['filtered_values'] = filtered_values
+    
     unique = []
     seen = set()
     for c in all_companies:
@@ -739,7 +771,7 @@ def parse_multiple_files(files):
             unique.append(c)
     return unique, unmapped_cities, all_sheets
 
-# ========== 数据校验函数（修复版） ==========
+# ========== 数据校验函数 ==========
 def validate_data(df, rules):
     if df is None or df.empty:
         return {'total_rows': 0, 'error_rows': 0, 'details': {}, 'summary': {}, 'error_rows_detail': {}}
@@ -757,7 +789,6 @@ def validate_data(df, rules):
     city_rule_map = {normalize_name(r['city']): r for r in rules}
     error_rows = {}
     
-    # 只检测真正的数值列，排除“校验”“状态”等
     numeric_cols = []
     for col in df.columns:
         col_lower = col.lower()
@@ -825,11 +856,9 @@ def get_rule_for_city(city, province=None):
         return None
     rules = load_rules()
     norm_city = normalize_name(city)
-    # 精确匹配城市
     for r in rules:
         if normalize_name(r['city']) == norm_city:
             return r
-    # 省份匹配
     if province:
         norm_prov = normalize_name(province)
         for r in rules:
@@ -837,7 +866,6 @@ def get_rule_for_city(city, province=None):
                 fallback = r.copy()
                 fallback['source_quote'] = f"省份默认（{province}）"
                 return fallback
-    # 全局默认
     return {
         'unit_social': 0.16,
         'personal_social': 0.08,
@@ -874,6 +902,13 @@ ensure_default_rules()
 fixed, total = fix_companies_province()
 if fixed > 0:
     st.success(f"✅ 自动修复了 {fixed}/{total} 家公司的省份数据")
+
+# 显示被过滤的异常值提示
+if 'filtered_values' in st.session_state and st.session_state['filtered_values']:
+    with st.expander("⚠️ 已过滤的异常数据"):
+        for val in st.session_state['filtered_values']:
+            st.write(f"- {val}")
+    st.session_state['filtered_values'] = []
 
 # ===== 侧边栏导航 =====
 st.sidebar.title("📌 导航")
@@ -980,11 +1015,11 @@ elif page == "📤 数据导入":
     if uploaded_files:
         with st.spinner("正在解析Excel..."):
             companies, unmapped, all_sheets = parse_multiple_files(uploaded_files)
-            if companies:
-                # 全部保留，包括省份为空的
-                valid_companies = companies
-                if unmapped:
-                    st.warning(f"⚠️ 以下城市未在规则库中找到：{', '.join(unmapped)}，将使用全局默认规则，请在规则管理中补充以获得更准确的数据。")
+            # 过滤掉异常公司（名称无效的已在解析时过滤）
+            valid_companies = companies
+            if unmapped:
+                st.warning(f"⚠️ 以下城市未在规则库中找到：{', '.join(unmapped)}，将使用全局默认规则，请在规则管理中补充以获得更准确的数据。")
+            if valid_companies:
                 save_companies(valid_companies)
                 st.success(f"成功提取 {len(valid_companies)} 家公司，来自 {len(uploaded_files)} 个文件")
                 st.session_state['uploaded_files'] = uploaded_files
@@ -1012,7 +1047,7 @@ elif page == "📤 数据导入":
                         st.session_state['validation_report'] = validate_data(df, rules)
                         st.success(f"已自动加载 Sheet「{default_sheet}」（表头行: {header_row+1}），共 {len(df)} 行数据")
             else:
-                st.warning("未识别到公司数据，请确认Excel包含「城市」和「公司」列")
+                st.warning("未识别到有效公司数据，请检查数据格式")
     
     if 'imported_df' in st.session_state and st.session_state['imported_df'] is not None:
         st.subheader("📊 数据预览")
