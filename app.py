@@ -56,11 +56,10 @@ def restore_backup(backup_file):
         st.error(f"恢复失败：{e}")
         return False
 
-# ========== 数据库初始化（含所有新表） ==========
+# ========== 数据库初始化 ==========
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    # 原有表
     c.execute('''CREATE TABLE IF NOT EXISTS companies (
         id TEXT PRIMARY KEY, company_name TEXT, province TEXT, city TEXT, district TEXT, tax_id TEXT
     )''')
@@ -112,43 +111,18 @@ def init_db():
         rule_verified BOOLEAN DEFAULT 0, data_verified BOOLEAN DEFAULT 0,
         reviewer_name TEXT, verified_at TEXT, notes TEXT, export_type TEXT DEFAULT '验证版'
     )''')
-    
-    # ===== 新增：规则历史表 =====
     c.execute('''CREATE TABLE IF NOT EXISTS rule_history (
-        id TEXT PRIMARY KEY,
-        rule_id TEXT,
-        action_type TEXT,
-        old_values TEXT,
-        new_values TEXT,
-        changed_by TEXT,
-        changed_at TEXT,
-        notes TEXT
+        id TEXT PRIMARY KEY, rule_id TEXT, action_type TEXT,
+        old_values TEXT, new_values TEXT, changed_by TEXT, changed_at TEXT, notes TEXT
     )''')
-    
-    # ===== 新增：模板历史表 =====
     c.execute('''CREATE TABLE IF NOT EXISTS template_history (
-        id TEXT PRIMARY KEY,
-        template_id TEXT,
-        action_type TEXT,
-        old_values TEXT,
-        new_values TEXT,
-        changed_by TEXT,
-        changed_at TEXT,
-        notes TEXT
+        id TEXT PRIMARY KEY, template_id TEXT, action_type TEXT,
+        old_values TEXT, new_values TEXT, changed_by TEXT, changed_at TEXT, notes TEXT
     )''')
-    
-    # ===== 新增：操作日志表 =====
     c.execute('''CREATE TABLE IF NOT EXISTS audit_log (
-        id TEXT PRIMARY KEY,
-        user_name TEXT,
-        action_type TEXT,
-        target_type TEXT,
-        target_id TEXT,
-        details TEXT,
-        ip_address TEXT,
-        created_at TEXT
+        id TEXT PRIMARY KEY, user_name TEXT, action_type TEXT,
+        target_type TEXT, target_id TEXT, details TEXT, ip_address TEXT, created_at TEXT
     )''')
-    
     conn.commit()
     conn.close()
 
@@ -158,14 +132,12 @@ init_db()
 def migrate_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    # 规则表迁移
     c.execute("PRAGMA table_info(rules)")
     existing_cols = [col[1] for col in c.fetchall()]
     new_cols = ['source_url', 'source_title', 'source_publish_date', 'collected_at', 'applicable_region', 'official_channel', 'notes']
     for col in new_cols:
         if col not in existing_cols:
             c.execute(f"ALTER TABLE rules ADD COLUMN {col} TEXT")
-    # 其他表迁移
     tables_to_check = [
         ('templates', ['field_mapping_source']),
         ('export_history', ['batch_id', 'job_name', 'field_mapping']),
@@ -177,7 +149,6 @@ def migrate_db():
         for col in cols:
             if col not in existing:
                 c.execute(f"ALTER TABLE {table} ADD COLUMN {col} TEXT")
-    # 检查新表
     c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='job_batches'")
     if not c.fetchone():
         c.execute('''CREATE TABLE job_batches (
@@ -224,7 +195,7 @@ def migrate_db():
 
 migrate_db()
 
-# ========== 数据操作函数（新增历史/日志相关） ==========
+# ========== 数据操作函数 ==========
 def dict_fetchall(cursor):
     columns = [col[0] for col in cursor.description]
     return [dict(zip(columns, row)) for row in cursor.fetchall()]
@@ -321,13 +292,11 @@ def log_template_change(template_id, action_type, old_values, new_values, change
     backup_database()
 
 def rollback_rule(history_id):
-    """回滚规则到指定历史版本"""
     history = safe_execute_query("SELECT * FROM rule_history WHERE id=?", (history_id,))
     if not history:
         return False
     h = history[0]
     old_vals = json.loads(h['old_values'])
-    # 更新规则
     rules = load_rules()
     for r in rules:
         if r['id'] == h['rule_id']:
@@ -348,7 +317,7 @@ def rollback_template(history_id):
         if t['id'] == h['template_id']:
             t.update(old_vals)
             break
-    save_template(t)  # 需要批量保存
+    save_template(t)
     log_audit("系统", "ROLLBACK", "template", h['template_id'], f"回滚到版本 {h['changed_at']}")
     return True
 
@@ -1062,7 +1031,7 @@ page = st.sidebar.radio("选择功能", [
     "🔐 审计日志"
 ])
 
-# ===== 全局Sheet选择器 =====
+# ===== 全局Sheet选择器（保留侧边栏） =====
 if 'uploaded_files' in st.session_state and st.session_state['uploaded_files']:
     st.sidebar.markdown("---")
     st.sidebar.subheader("📂 数据Sheet选择")
@@ -1184,6 +1153,37 @@ elif page == "📤 数据导入":
                     rules = load_rules()
                     st.session_state['validation_report'] = validate_data(df, rules)
                     st.success(f"已自动加载 Sheet「{data_sheet}」（表头行: {header_row+1}），共 {len(df)} 行数据")
+    
+    # ===== 【新增】数据导入页面的Sheet选择器（不影响其他功能） =====
+    if 'uploaded_files' in st.session_state and st.session_state['uploaded_files']:
+        st.markdown("---")
+        st.subheader("📂 选择数据Sheet（切换后自动刷新）")
+        first_file = st.session_state['uploaded_files'][0]
+        xls = pd.ExcelFile(first_file)
+        sheets = xls.sheet_names
+        current_sheet = st.session_state.get('data_sheet_name', sheets[0] if sheets else '')
+        selected_sheet = st.selectbox(
+            "请选择包含公司数据的Sheet",
+            sheets,
+            index=sheets.index(current_sheet) if current_sheet in sheets else 0,
+            key="sheet_selector_in_import"
+        )
+        if selected_sheet != st.session_state.get('data_sheet_name'):
+            df, header_row = auto_load_sheet_with_header_detection(first_file, selected_sheet)
+            st.session_state['imported_df'] = df
+            st.session_state['data_sheet_name'] = selected_sheet
+            st.session_state['data_header_row'] = header_row
+            st.session_state['data_recognition']['selected_sheet'] = selected_sheet
+            st.session_state['data_recognition']['header_row'] = header_row
+            st.session_state['data_recognition']['columns'] = list(df.columns) if df is not None else []
+            st.session_state['data_recognition']['total_rows'] = len(df) if df is not None else 0
+            rules = load_rules()
+            st.session_state['validation_report'] = validate_data(df, rules)
+            st.success(f"✅ 已切换到 Sheet「{selected_sheet}」，共 {len(df)} 行数据")
+            st.rerun()
+        else:
+            st.info(f"当前Sheet: {selected_sheet}，共 {len(st.session_state['imported_df'])} 行数据")
+    
     st.markdown("---")
     st.subheader("🔍 数据识别结果")
     if 'data_recognition' in st.session_state:
@@ -1222,7 +1222,6 @@ elif page == "📤 数据导入":
             st.dataframe(df.head(10), use_container_width=True)
         st.caption(f"当前Sheet: {st.session_state.get('data_sheet_name', '未知')}，共 {len(df)} 行")
         
-        # ===== 导出清洗后数据 =====
         if st.button("📤 导出清洗后数据（Excel）", key="export_cleaned"):
             output = BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
@@ -1273,7 +1272,6 @@ elif page == "📚 依据库管理":
         if companies:
             st.dataframe(pd.DataFrame(companies))
             st.caption(f"共 {len(companies)} 家公司")
-            # ===== 批量删除公司 =====
             st.markdown("**批量操作**")
             selected_for_delete = st.multiselect("选择要删除的公司", [c['company_name'] for c in companies])
             if st.button("🗑️ 删除选中公司", key="batch_delete_companies"):
@@ -1435,7 +1433,6 @@ elif page == "⚙️ 规则管理":
             if st.button("📋 导出规则清单"):
                 st.dataframe(df_rules[['city', 'province', 'unit_social', 'personal_social', 'unit_fund', 'personal_fund']], use_container_width=True)
         with col_btn3:
-            # ===== 跨城市规则复制 =====
             with st.expander("📋 跨城市规则复制", expanded=False):
                 if len(rules) >= 2:
                     source_city = st.selectbox("源城市", [r['city'] for r in rules])
@@ -1456,13 +1453,11 @@ elif page == "⚙️ 规则管理":
                 else:
                     st.info("至少需要2个城市规则才能复制")
         
-        # ===== 规则历史查看 =====
         with st.expander("📜 规则变更历史", expanded=False):
             hist = load_rule_history()
             if hist:
                 df_hist = pd.DataFrame(hist)
                 st.dataframe(df_hist[['rule_id', 'action_type', 'changed_by', 'changed_at', 'notes']], use_container_width=True)
-                # 回滚功能
                 hist_id = st.selectbox("选择历史版本回滚", [h['id'] for h in hist] if hist else [])
                 if st.button("↩️ 回滚到此版本"):
                     if rollback_rule(hist_id):
@@ -1654,7 +1649,6 @@ elif page == "📄 自定义模板":
         except Exception as e:
             st.error(f"处理模板失败：{e}")
     
-    # ===== 模板历史查看 =====
     with st.expander("📜 模板变更历史", expanded=False):
         hist = load_template_history()
         if hist:
@@ -1785,7 +1779,6 @@ elif page == "💾 备份与恢复":
     backups = get_backup_list()
     if backups:
         st.write(f"共 {len(backups)} 份备份")
-        # ===== 一键恢复到时间点 =====
         st.markdown("**恢复到指定时间点**")
         backup_dates = [f.split('_')[2] + '_' + f.split('_')[3] for f in backups]
         selected_date = st.selectbox("选择备份时间点", backup_dates)
@@ -1994,13 +1987,9 @@ elif page == "🔐 审计日志":
     if logs:
         df_logs = pd.DataFrame(logs)
         st.dataframe(df_logs[['created_at', 'user_name', 'action_type', 'target_type', 'target_id', 'details']], use_container_width=True)
-        
-        # 统计
         st.markdown("**操作统计**")
         action_counts = df_logs['action_type'].value_counts()
         st.dataframe(pd.DataFrame({'操作类型': action_counts.index, '次数': action_counts.values}), use_container_width=True)
-        
-        # 搜索
         search_term = st.text_input("搜索日志")
         if search_term:
             filtered = df_logs[df_logs['details'].str.contains(search_term, case=False, na=False) | 
