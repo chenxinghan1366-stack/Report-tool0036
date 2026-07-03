@@ -56,7 +56,7 @@ def restore_backup(backup_file):
         st.error(f"恢复失败：{e}")
         return False
 
-# ========== 数据库初始化（扩展规则表） ==========
+# ========== 数据库初始化 ==========
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -439,7 +439,7 @@ def update_batch_status(batch_id, status, review_status=None):
     conn.close()
     backup_database()
 
-# ========== 初始化示例规则（带来源信息） ==========
+# ========== 初始化示例规则 ==========
 def init_sample_rules():
     existing = load_rules()
     if existing:
@@ -466,7 +466,7 @@ def init_sample_rules():
             'collected_at': datetime.now().isoformat(),
             'applicable_region': '上海',
             'official_channel': '上海市人社局官网',
-            'notes': '示例规则，请替换为官方来源核实'
+            'notes': '示例规则'
         },
         {
             'id': str(uuid.uuid4())[:8],
@@ -489,7 +489,7 @@ def init_sample_rules():
             'collected_at': datetime.now().isoformat(),
             'applicable_region': '北京',
             'official_channel': '北京市人社局官网',
-            'notes': '示例规则，请替换为官方来源核实'
+            'notes': '示例规则'
         },
     ]
     save_rules(sample_rules)
@@ -573,6 +573,27 @@ def is_valid_city_name(text):
         return False
     return len(re.findall(r'[\u4e00-\u9fa5]', text)) >= 2
 
+# ========== 优化一：列名智能匹配 ==========
+# 列名同义词库
+CITY_KEYWORDS = ['城市', '所属城市', '城市名称', '地区', '所属地区', 'city', '地区名', '城市名']
+COMPANY_KEYWORDS = ['公司', '分公司', '公司名称', '企业名称', '单位名称', 'company', '单位', '企业']
+DISTRICT_KEYWORDS = ['区县', '区', '县', '城区', 'district', '区域']
+
+def detect_columns(df):
+    """智能检测城市、公司、区县列"""
+    city_col = None
+    company_col = None
+    district_col = None
+    for col in df.columns:
+        col_lower = col.lower().strip()
+        if any(kw in col_lower for kw in CITY_KEYWORDS):
+            city_col = col
+        elif any(kw in col_lower for kw in COMPANY_KEYWORDS):
+            company_col = col
+        elif any(kw in col_lower for kw in DISTRICT_KEYWORDS):
+            district_col = col
+    return city_col, company_col, district_col
+
 def parse_uploaded_excel(file):
     xls = pd.ExcelFile(file)
     sheets = xls.sheet_names
@@ -600,14 +621,21 @@ def parse_uploaded_excel(file):
             if header_row is not None:
                 df = pd.read_excel(file, sheet_name=sheet, skiprows=header_row)
                 df.columns = [str(c).strip() for c in df.columns]
-                city_col = None; company_col = None; district_col = None
-                for col in df.columns:
-                    if '所属城市' in col or '城市' in col:
-                        city_col = col
-                    elif '分公司' in col or '公司' in col:
-                        company_col = col
-                    elif '区县' in col or '区' in col:
-                        district_col = col
+                # 【优化】使用智能列名匹配
+                city_col, company_col, district_col = detect_columns(df)
+                # 如果仍未匹配，让用户手动选择（在数据导入页面会显示）
+                if city_col is None or company_col is None:
+                    st.session_state['column_mapping_needed'] = True
+                    st.session_state['df_columns'] = list(df.columns)
+                    st.warning(f"Sheet「{sheet}」未能自动识别列，请在下方选择映射")
+                    # 这里用st.selectbox让用户选择
+                    all_cols = list(df.columns)
+                    city_col = st.selectbox(f"请选择「{sheet}」的城市列", [""] + all_cols, key=f"city_col_{sheet}")
+                    company_col = st.selectbox(f"请选择「{sheet}」的公司列", [""] + all_cols, key=f"company_col_{sheet}")
+                    district_col = st.selectbox(f"请选择「{sheet}」的区县列（可选）", [""] + all_cols, key=f"district_col_{sheet}")
+                    if not city_col or not company_col:
+                        st.error(f"Sheet「{sheet}」必须选择城市列和公司列")
+                        continue
                 if city_col and company_col:
                     for _, row in df.iterrows():
                         city = str(row[city_col]) if pd.notna(row[city_col]) else ''
@@ -650,7 +678,9 @@ def parse_multiple_files(files):
     data_sheet_name = None
     for file in files:
         companies, unmapped, sheets, data_sheet = parse_uploaded_excel(file)
-        all_companies.extend(companies); all_sheets.extend(sheets); unmapped_cities.update(unmapped)
+        all_companies.extend(companies)
+        all_sheets.extend(sheets)
+        unmapped_cities.update(unmapped)
         if data_sheet and not data_sheet_name:
             data_sheet_name = data_sheet
     unique = []
@@ -668,7 +698,7 @@ def validate_data(df, rules):
     errors = {}
     city_col = None
     for col in df.columns:
-        if '城市' in col:
+        if any(kw in col.lower() for kw in CITY_KEYWORDS):
             city_col = col; break
     if city_col is None:
         errors['城市列缺失'] = ['未找到城市列']
@@ -701,7 +731,7 @@ def validate_data(df, rules):
                     row_errors.append(f'列"{col}"值无法转换为数字')
         company_col = None
         for col in df.columns:
-            if '公司' in col or '分公司' in col:
+            if any(kw in col.lower() for kw in COMPANY_KEYWORDS):
                 company_col = col; break
         if company_col is not None:
             val = row[company_col]
@@ -728,22 +758,36 @@ def validate_data(df, rules):
         'error_rows_detail': error_rows
     }
 
-def get_rule_for_city(city, province=None):
+# ========== 优化二：规则自动推断 + 批量补全 ==========
+def auto_create_rule_for_city(city, province=None):
+    """为城市自动创建规则（从同省份复制）"""
     if not city:
         return None
     rules = load_rules()
     norm_city = normalize_name(city)
+    # 检查是否已存在
     for r in rules:
         if normalize_name(r['city']) == norm_city:
             return r
+    # 如果有省份，查找同省份规则
     if province:
         norm_prov = normalize_name(province)
         for r in rules:
             if normalize_name(r.get('province', '')) == norm_prov:
-                fallback = r.copy()
-                fallback['source_quote'] = f"省份默认（{province}）"
-                return fallback
-    return {
+                new_rule = r.copy()
+                new_rule['id'] = str(uuid.uuid4())[:8]
+                new_rule['city'] = city
+                new_rule['source_quote'] = f"自动创建（来自{province}默认）"
+                new_rule['is_default'] = 0
+                new_rule['notes'] = f"自动推断创建，基于{r.get('city')}规则"
+                rules.append(new_rule)
+                save_rules(rules)
+                return new_rule
+    # 全局默认
+    fallback = {
+        'id': str(uuid.uuid4())[:8],
+        'city': city,
+        'province': province or '',
         'unit_social': 0.16,
         'personal_social': 0.08,
         'unit_fund': 0.12,
@@ -754,12 +798,52 @@ def get_rule_for_city(city, province=None):
         'fund_max': 999999,
         'source_quote': '全局默认',
         'rule_version': 'v1.0',
-        'source_title': '系统内置默认值',
+        'effective_date': datetime.now().strftime('%Y-%m-%d'),
         'source_url': '#',
+        'source_title': '系统内置默认值',
         'source_publish_date': datetime.now().strftime('%Y-%m-%d'),
+        'collected_at': datetime.now().isoformat(),
         'applicable_region': '全国',
-        'official_channel': '系统内置'
+        'official_channel': '系统内置',
+        'notes': '自动创建'
     }
+    rules.append(fallback)
+    save_rules(rules)
+    return fallback
+
+def get_rule_for_city(city, province=None):
+    if not city:
+        return None
+    rules = load_rules()
+    norm_city = normalize_name(city)
+    for r in rules:
+        if normalize_name(r['city']) == norm_city:
+            return r
+    # 自动创建规则（优化二）
+    return auto_create_rule_for_city(city, province)
+
+def batch_create_missing_rules():
+    """从已导入的公司数据批量补全缺失的规则"""
+    companies = load_companies()
+    if not companies:
+        return 0, "请先导入公司数据"
+    existing_cities = {normalize_name(r['city']) for r in load_rules()}
+    added = 0
+    errors = []
+    for comp in companies:
+        city = comp.get('city', '')
+        if not city:
+            continue
+        norm_city = normalize_name(city)
+        if norm_city not in existing_cities:
+            province = comp.get('province', '')
+            result = auto_create_rule_for_city(city, province)
+            if result:
+                added += 1
+                existing_cities.add(norm_city)
+            else:
+                errors.append(city)
+    return added, f"已补全 {added} 个城市" + (f"，失败: {', '.join(errors)}" if errors else "")
 
 def get_data_source_info(df):
     info = {}
@@ -1138,6 +1222,18 @@ elif page == "⚙️ 规则管理":
     if rules:
         df_rules = pd.DataFrame(rules)
         st.dataframe(df_rules[['city', 'province', 'unit_social', 'personal_social', 'unit_fund', 'personal_fund', 'social_min', 'social_max', 'source_quote', 'rule_version', 'source_url', 'source_title']], use_container_width=True)
+        
+        # 【优化二】批量补全按钮
+        col_btn1, col_btn2 = st.columns(2)
+        with col_btn1:
+            if st.button("🔧 从公司数据批量补全规则"):
+                added, msg = batch_create_missing_rules()
+                st.success(msg)
+                st.rerun()
+        with col_btn2:
+            if st.button("📋 导出规则清单"):
+                st.dataframe(df_rules[['city', 'province', 'unit_social', 'personal_social', 'unit_fund', 'personal_fund']], use_container_width=True)
+        
         with st.expander("➕ 新增城市规则（需填写官方来源）", expanded=False):
             with st.form(key="add_rule_form"):
                 col1, col2 = st.columns(2)
@@ -1254,7 +1350,7 @@ elif page == "⚙️ 规则管理":
                         st.rerun()
         if st.button("🔄 重置所有规则为系统默认值（会覆盖所有自定义规则）"):
             if st.checkbox("确认重置？此操作将覆盖所有自定义规则"):
-                sample_rules = [{'id': str(uuid.uuid4())[:8], 'city': '上海', 'province': '上海', 'unit_social': 0.16, 'personal_social': 0.08, 'unit_fund': 0.07, 'personal_fund': 0.07, 'social_min': 7310, 'social_max': 36549, 'fund_min': 2590, 'fund_max': 34188, 'source_quote': '沪人社规〔2024〕22号', 'rule_version': '2024.1', 'effective_date': '2024-07-01', 'source_url': 'https://rsj.sh.gov.cn/', 'source_title': '上海市2024年度社保缴费基数调整通知', 'source_publish_date': '2024-06-20', 'collected_at': datetime.now().isoformat(), 'applicable_region': '上海', 'official_channel': '上海市人社局官网', 'notes': '示例规则，请替换'}, {'id': str(uuid.uuid4())[:8], 'city': '北京', 'province': '北京', 'unit_social': 0.16, 'personal_social': 0.08, 'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 6326, 'social_max': 33891, 'fund_min': 2420, 'fund_max': 33891, 'source_quote': '京人社发〔2024〕15号', 'rule_version': '2024.1', 'effective_date': '2024-07-01', 'source_url': 'https://rsj.beijing.gov.cn/', 'source_title': '北京市2024年度社保缴费基数调整通知', 'source_publish_date': '2024-06-25', 'collected_at': datetime.now().isoformat(), 'applicable_region': '北京', 'official_channel': '北京市人社局官网', 'notes': '示例规则，请替换'}]
+                sample_rules = [{'id': str(uuid.uuid4())[:8], 'city': '上海', 'province': '上海', 'unit_social': 0.16, 'personal_social': 0.08, 'unit_fund': 0.07, 'personal_fund': 0.07, 'social_min': 7310, 'social_max': 36549, 'fund_min': 2590, 'fund_max': 34188, 'source_quote': '沪人社规〔2024〕22号', 'rule_version': '2024.1', 'effective_date': '2024-07-01', 'source_url': 'https://rsj.sh.gov.cn/', 'source_title': '上海市2024年度社保缴费基数调整通知', 'source_publish_date': '2024-06-20', 'collected_at': datetime.now().isoformat(), 'applicable_region': '上海', 'official_channel': '上海市人社局官网', 'notes': '示例规则'}]
                 save_rules(sample_rules)
                 st.success("已重置为示例规则！")
                 st.rerun()
@@ -1433,7 +1529,6 @@ elif page == "💾 备份与恢复":
         if path:
             st.success(f"备份成功：{os.path.basename(path)}")
 
-# ===== 新增：年审数据处理页面 =====
 elif page == "📋 年审数据处理":
     st.subheader("📋 年审数据处理与交付")
     st.markdown("**处理流程：系统账单筛选 → 上海数据合并 → 基数核算 → 实缴核算 → 归档交付**")
@@ -1474,7 +1569,7 @@ elif page == "📋 年审数据处理":
                 st.write(f"原始账单行数: {len(df_bill)}")
                 city_col = None
                 for col in df_bill.columns:
-                    if '城市' in col or '地区' in col or '所属地' in col:
+                    if any(kw in col.lower() for kw in ['城市', '地区', '所属地']):
                         city_col = col; break
                 if city_col:
                     df_gz = df_bill[df_bill[city_col].astype(str).str.contains('广州', na=False)]
@@ -1605,7 +1700,7 @@ elif page == "📋 年审数据处理":
         with col3:
             st.metric("本期实缴金额", f"{results.get('total_amount', 0):,.0f}")
 
-# ===== 底部：快速生成报表（在所有页面可见） =====
+# ===== 底部：快速生成报表（含进度条优化） =====
 st.markdown("---")
 st.subheader("🚀 快速生成报表")
 
@@ -1794,7 +1889,16 @@ else:
                 errors = []
                 job_details = []
                 data_source_text = st.session_state.get('data_sheet_name', '未知')
-                for comp in selected_companies:
+                
+                # 【优化三】进度条
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                total = len(selected_companies)
+                
+                for idx, comp in enumerate(selected_companies):
+                    status_text.text(f"正在处理 {idx+1}/{total}: {comp['company_name']}")
+                    progress_bar.progress((idx + 1) / total)
+                    
                     try:
                         rule = get_rule_for_city(comp['city'], comp.get('province'))
                         if rule is None:
@@ -1806,7 +1910,7 @@ else:
                             df_data = st.session_state['imported_df']
                             company_col = None
                             for col in df_data.columns:
-                                if '公司' in str(col) or '分公司' in str(col):
+                                if any(kw in col.lower() for kw in COMPANY_KEYWORDS):
                                     company_col = col; break
                             if company_col:
                                 df_comp = df_data[df_data[company_col] == comp['company_name']]
@@ -1988,6 +2092,10 @@ else:
                     except Exception as e:
                         errors.append(f"{comp['company_name']}: {str(e)}")
                         job_details.append({'id': str(uuid.uuid4())[:8], 'batch_id': batch_id, 'company_id': comp.get('id', ''), 'company_name': comp['company_name'], 'city': comp.get('city', ''), 'province': comp.get('province', ''), 'report_type': report_type, 'period_type': period_label, 'status': 'error', 'error_message': str(e), 'file_name': '', 'file_data': None, 'generated_at': datetime.now().isoformat(), 'rule_source': '', 'data_source': data_source_text})
+                
+                progress_bar.empty()
+                status_text.empty()
+                
                 save_job_details(job_details)
                 update_batch_status(batch_id, 'completed', 'pending')
                 if errors:
