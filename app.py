@@ -696,6 +696,73 @@ def highlight_error_rows(df, error_rows):
             return [''] * len(row)
     return df.style.apply(row_style, axis=1)
 
+# ========== 【核心】解析Excel - 直接从指定Sheet读取公司数据 ==========
+def parse_companies_from_sheet(file, sheet_name):
+    """直接从指定Sheet解析公司数据（跳过表头检测）"""
+    try:
+        df = pd.read_excel(file, sheet_name=sheet_name)
+        # 清理列名
+        df.columns = [str(c).strip() for c in df.columns]
+        df = df.dropna(how='all')
+        
+        # 查找列
+        province_col = None
+        city_col = None
+        district_col = None
+        company_col = None
+        
+        for col in df.columns:
+            col_lower = col.lower().strip()
+            if '省份' in col_lower:
+                province_col = col
+            elif any(kw in col_lower for kw in ['城市', '所属城市']):
+                city_col = col
+            elif any(kw in col_lower for kw in ['城区', '区县', '区']):
+                district_col = col
+            elif any(kw in col_lower for kw in ['公司名称', '公司', '企业名称']):
+                company_col = col
+        
+        if not city_col or not company_col:
+            return [], set()
+        
+        # 构建省份映射
+        city_province_map = {}
+        for r in load_rules():
+            key = normalize_name(r['city'])
+            city_province_map[key] = r['province']
+        
+        companies = []
+        unmapped_cities = set()
+        
+        for _, row in df.iterrows():
+            city = str(row[city_col]) if pd.notna(row[city_col]) else ''
+            company = str(row[company_col]) if pd.notna(row[company_col]) else ''
+            province = str(row[province_col]) if province_col and pd.notna(row[province_col]) else ''
+            district = str(row[district_col]) if district_col and pd.notna(row[district_col]) else ''
+            
+            if not city or not company:
+                continue
+            
+            # 如果省份为空，尝试从映射中获取
+            if not province:
+                norm_city = normalize_name(city)
+                province = city_province_map.get(norm_city, '')
+                if not province:
+                    unmapped_cities.add(city)
+            
+            companies.append({
+                'company_name': company,
+                'province': province,
+                'city': city,
+                'district': district,
+                'tax_id': ''
+            })
+        
+        return companies, unmapped_cities
+    except Exception as e:
+        st.error(f"解析Sheet失败: {e}")
+        return [], set()
+
 def parse_uploaded_excel(file):
     xls = pd.ExcelFile(file)
     sheets = xls.sheet_names
@@ -1031,44 +1098,6 @@ page = st.sidebar.radio("选择功能", [
     "🔐 审计日志"
 ])
 
-# ===== 全局Sheet选择器（保留侧边栏） =====
-if 'uploaded_files' in st.session_state and st.session_state['uploaded_files']:
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("📂 数据Sheet选择")
-    files = st.session_state['uploaded_files']
-    if len(files) > 1:
-        file_names = [f.name for f in files]
-        selected_file_name = st.sidebar.selectbox("选择数据文件", file_names, key="global_file_select")
-        selected_file = next(f for f in files if f.name == selected_file_name)
-    else:
-        selected_file = files[0]
-    try:
-        xls = pd.ExcelFile(selected_file)
-        sheets = xls.sheet_names
-        current_sheet = st.session_state.get('data_sheet_name', sheets[0] if sheets else '')
-        idx = sheets.index(current_sheet) if current_sheet in sheets else 0
-        selected_sheet = st.sidebar.selectbox("选择Sheet", sheets, index=idx, key="global_sheet_select")
-        if selected_sheet != st.session_state.get('data_sheet_name'):
-            df, header_row = auto_load_sheet_with_header_detection(selected_file, selected_sheet)
-            st.session_state['imported_df'] = df
-            st.session_state['data_sheet_name'] = selected_sheet
-            st.session_state['data_header_row'] = header_row
-            st.session_state['data_recognition'] = {
-                'sheets': sheets,
-                'selected_sheet': selected_sheet,
-                'header_row': header_row,
-                'columns': list(df.columns) if df is not None else [],
-                'total_rows': len(df) if df is not None else 0
-            }
-            rules = load_rules()
-            st.session_state['validation_report'] = validate_data(df, rules)
-            st.sidebar.success(f"✅ 已加载: {selected_sheet} (表头行: {header_row+1})")
-            st.rerun()
-        else:
-            st.sidebar.info(f"当前: {selected_sheet}")
-    except Exception as e:
-        st.sidebar.error(f"读取Sheet失败: {e}")
-
 # ===== 各页面 =====
 if page == "📊 工作台":
     st.subheader("📊 工作台概览")
@@ -1117,72 +1146,109 @@ if page == "📊 工作台":
 
 elif page == "📤 数据导入":
     st.subheader("📤 数据导入（支持多文件）")
-    import_mode = st.radio("导入模式", ["智能导入（自动识别结构）", "普通导入（手动选择列，开发中）"], index=0, horizontal=True)
-    st.caption("智能导入将自动识别城市、公司等列；普通导入可自定义列映射（开发中，当前与智能导入相同）")
+    
     uploaded_files = st.file_uploader("选择Excel文件（支持多个 .xlsx）", type=["xlsx"], accept_multiple_files=True)
+    
     if uploaded_files:
         with st.spinner("正在解析Excel..."):
-            companies, unmapped, all_sheets, data_sheet = parse_multiple_files(uploaded_files)
-            valid_companies = companies
-            if unmapped:
-                st.warning(f"⚠️ 以下城市未在规则库中找到：{', '.join(unmapped)}，将使用全局默认规则")
-            if valid_companies:
-                save_companies(valid_companies)
-                log_audit("系统", "UPLOAD", "companies", "", f"导入 {len(valid_companies)} 家公司")
-                st.success(f"成功提取 {len(valid_companies)} 家公司，来自 {len(uploaded_files)} 个文件")
-                st.session_state['uploaded_files'] = uploaded_files
-                st.session_state['all_sheets'] = all_sheets
+            # 获取文件信息
+            first_file = uploaded_files[0]
+            xls = pd.ExcelFile(first_file)
+            all_sheets = xls.sheet_names
+            
+            # 保存文件到session
+            st.session_state['uploaded_files'] = uploaded_files
+            st.session_state['all_sheets'] = all_sheets
+            
+            # 选择默认Sheet（优先选择年检主数据表或公司维度明细台账）
+            default_sheet = None
+            for kw in ['年检主数据表', '公司维度明细台账', '主数据', '明细台账']:
+                for s in all_sheets:
+                    if kw in s:
+                        default_sheet = s
+                        break
+                if default_sheet:
+                    break
+            if not default_sheet:
+                default_sheet = all_sheets[0]
+            
+            st.session_state['selected_sheet'] = default_sheet
+            
+            # 解析公司数据
+            companies, unmapped = parse_companies_from_sheet(first_file, default_sheet)
+            
+            if companies:
+                save_companies(companies)
+                log_audit("系统", "UPLOAD", "companies", "", f"导入 {len(companies)} 家公司")
+                st.success(f"✅ 成功提取 {len(companies)} 家公司（Sheet: {default_sheet}）")
+                if unmapped:
+                    st.warning(f"⚠️ 以下城市未在规则库中找到：{', '.join(unmapped)}，将使用全局默认规则")
+                
+                # 加载数据预览
+                df, header_row = auto_load_sheet_with_header_detection(first_file, default_sheet)
+                st.session_state['imported_df'] = df
+                st.session_state['data_sheet_name'] = default_sheet
+                st.session_state['data_header_row'] = header_row
+                rules = load_rules()
+                st.session_state['validation_report'] = validate_data(df, rules)
+                
+                # 保存识别结果
                 st.session_state['data_recognition'] = {
                     'sheets': all_sheets,
-                    'selected_sheet': data_sheet,
-                    'header_row': 1,
-                    'columns': [],
-                    'total_rows': 0,
-                    'files_count': len(uploaded_files),
-                    'companies_extracted': len(valid_companies)
+                    'selected_sheet': default_sheet,
+                    'header_row': header_row,
+                    'columns': list(df.columns) if df is not None else [],
+                    'total_rows': len(df) if df is not None else 0,
+                    'companies_extracted': len(companies)
                 }
-                if uploaded_files and data_sheet:
-                    first_file = uploaded_files[0]
-                    df, header_row = auto_load_sheet_with_header_detection(first_file, data_sheet)
-                    st.session_state['imported_df'] = df
-                    st.session_state['data_sheet_name'] = data_sheet
-                    st.session_state['data_header_row'] = header_row
-                    st.session_state['data_recognition']['header_row'] = header_row
-                    st.session_state['data_recognition']['columns'] = list(df.columns) if df is not None else []
-                    st.session_state['data_recognition']['total_rows'] = len(df) if df is not None else 0
-                    rules = load_rules()
-                    st.session_state['validation_report'] = validate_data(df, rules)
-                    st.success(f"已自动加载 Sheet「{data_sheet}」（表头行: {header_row+1}），共 {len(df)} 行数据")
+            else:
+                st.error("未提取到任何公司数据，请检查Sheet是否正确")
     
-    # ===== 【新增】数据导入页面的Sheet选择器（不影响其他功能） =====
+    # ===== Sheet选择器（带自动重新加载） =====
     if 'uploaded_files' in st.session_state and st.session_state['uploaded_files']:
         st.markdown("---")
-        st.subheader("📂 选择数据Sheet（切换后自动刷新）")
+        st.subheader("📂 选择数据Sheet（切换后自动重新加载公司数据）")
+        
         first_file = st.session_state['uploaded_files'][0]
         xls = pd.ExcelFile(first_file)
         sheets = xls.sheet_names
-        current_sheet = st.session_state.get('data_sheet_name', sheets[0] if sheets else '')
+        current_sheet = st.session_state.get('selected_sheet', sheets[0] if sheets else '')
+        
         selected_sheet = st.selectbox(
             "请选择包含公司数据的Sheet",
             sheets,
             index=sheets.index(current_sheet) if current_sheet in sheets else 0,
-            key="sheet_selector_in_import"
+            key="sheet_selector_in_import_v2"
         )
-        if selected_sheet != st.session_state.get('data_sheet_name'):
-            df, header_row = auto_load_sheet_with_header_detection(first_file, selected_sheet)
-            st.session_state['imported_df'] = df
-            st.session_state['data_sheet_name'] = selected_sheet
-            st.session_state['data_header_row'] = header_row
-            st.session_state['data_recognition']['selected_sheet'] = selected_sheet
-            st.session_state['data_recognition']['header_row'] = header_row
-            st.session_state['data_recognition']['columns'] = list(df.columns) if df is not None else []
-            st.session_state['data_recognition']['total_rows'] = len(df) if df is not None else 0
-            rules = load_rules()
-            st.session_state['validation_report'] = validate_data(df, rules)
-            st.success(f"✅ 已切换到 Sheet「{selected_sheet}」，共 {len(df)} 行数据")
-            st.rerun()
-        else:
-            st.info(f"当前Sheet: {selected_sheet}，共 {len(st.session_state['imported_df'])} 行数据")
+        
+        col_btn1, col_btn2 = st.columns(2)
+        with col_btn1:
+            if st.button("🔄 重新加载此Sheet数据", key="reload_sheet_data"):
+                st.session_state['selected_sheet'] = selected_sheet
+                companies, unmapped = parse_companies_from_sheet(first_file, selected_sheet)
+                if companies:
+                    save_companies(companies)
+                    st.success(f"✅ 已重新加载 {len(companies)} 家公司（Sheet: {selected_sheet}）")
+                    if unmapped:
+                        st.warning(f"⚠️ 以下城市未在规则库中找到：{', '.join(unmapped)}")
+                    # 刷新预览
+                    df, header_row = auto_load_sheet_with_header_detection(first_file, selected_sheet)
+                    st.session_state['imported_df'] = df
+                    st.session_state['data_sheet_name'] = selected_sheet
+                    st.session_state['data_header_row'] = header_row
+                    rules = load_rules()
+                    st.session_state['validation_report'] = validate_data(df, rules)
+                    st.session_state['data_recognition']['selected_sheet'] = selected_sheet
+                    st.session_state['data_recognition']['total_rows'] = len(df)
+                    st.rerun()
+                else:
+                    st.error("此Sheet未提取到公司数据，请选择其他Sheet")
+        
+        with col_btn2:
+            if st.button("📊 查看当前公司列表", key="view_companies"):
+                companies = load_companies()
+                st.dataframe(pd.DataFrame(companies))
+                st.caption(f"共 {len(companies)} 家公司")
     
     st.markdown("---")
     st.subheader("🔍 数据识别结果")
