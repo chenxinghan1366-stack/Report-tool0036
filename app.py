@@ -2410,8 +2410,10 @@ else:
         else:
             company_list = []
         company_names = [c['company_name'] for c in company_list]
+        # ✅ 修复：过滤掉不在当前 company_names 中的默认值
         default_selected = st.session_state.get('batch_selected_companies', [])
-        selected_company_names = st.multiselect("公司（可多选）", company_names, default=default_selected, key="report_companies")
+        valid_default = [name for name in default_selected if name in company_names]
+        selected_company_names = st.multiselect("公司（可多选）", company_names, default=valid_default, key="report_companies")
     with col3:
         report_type = st.selectbox("报表类型", ["", "增值税", "社保", "公积金", "个人所得税", "企业所得税", "年度汇算清缴"], key="report_type")
         period_type = st.selectbox("统计口径", ["月度（固定月份）", "累计（1-12月）", "自定义月份范围"], key="period_type")
