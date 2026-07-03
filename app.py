@@ -56,34 +56,44 @@ def restore_backup(backup_file):
         st.error(f"恢复失败：{e}")
         return False
 
-# ========== 数据库初始化 ==========
+# ========== 数据库初始化（扩展规则表） ==========
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    # 公司表
     c.execute('''CREATE TABLE IF NOT EXISTS companies (
         id TEXT PRIMARY KEY, company_name TEXT, province TEXT, city TEXT, district TEXT, tax_id TEXT
     )''')
-    # 模板表
     c.execute('''CREATE TABLE IF NOT EXISTS templates (
         id TEXT PRIMARY KEY, province TEXT, city TEXT, district TEXT, report_type TEXT,
         template_name TEXT, template_version TEXT, source_url TEXT, source_authority TEXT,
         publish_date TEXT, required_fields TEXT, status TEXT, file_hash TEXT, file_type TEXT,
         is_custom BOOLEAN DEFAULT 0, field_mapping_source TEXT
     )''')
-    # 自定义模板
     c.execute('''CREATE TABLE IF NOT EXISTS custom_templates (
         id TEXT PRIMARY KEY, name TEXT, file_data BLOB, field_mapping TEXT,
         sheet_name TEXT, created_at TEXT, updated_at TEXT
     )''')
-    # 规则表
+    # 扩展规则表：增加来源字段
     c.execute('''CREATE TABLE IF NOT EXISTS rules (
-        id TEXT PRIMARY KEY, city TEXT, province TEXT, unit_social REAL, personal_social REAL,
-        unit_fund REAL, personal_fund REAL, social_min REAL, social_max REAL,
-        fund_min REAL, fund_max REAL, source_quote TEXT, is_default BOOLEAN DEFAULT 0,
-        rule_version TEXT, effective_date TEXT
+        id TEXT PRIMARY KEY, 
+        city TEXT, province TEXT, 
+        unit_social REAL, personal_social REAL,
+        unit_fund REAL, personal_fund REAL, 
+        social_min REAL, social_max REAL,
+        fund_min REAL, fund_max REAL, 
+        source_quote TEXT,           -- 来源文号（可保留）
+        is_default BOOLEAN DEFAULT 0,
+        rule_version TEXT, 
+        effective_date TEXT,
+        -- 新增来源信息
+        source_url TEXT,             -- 来源链接
+        source_title TEXT,           -- 来源标题
+        source_publish_date TEXT,    -- 来源发布时间
+        collected_at TEXT,           -- 采集时间（自动记录）
+        applicable_region TEXT,      -- 适用地区（如"全国"或"广东"）
+        official_channel TEXT,       -- 官方渠道名称（如"国家税务总局官网"）
+        notes TEXT                   -- 备注
     )''')
-    # 导出历史
     c.execute('''CREATE TABLE IF NOT EXISTS export_history (
         id TEXT PRIMARY KEY, company_id TEXT, template_id TEXT, company_name TEXT,
         city TEXT, province TEXT, report_type TEXT, period_type TEXT, generated_at TEXT,
@@ -91,27 +101,23 @@ def init_db():
         data_source TEXT, month_used TEXT, year_used TEXT, custom_period TEXT,
         batch_id TEXT, job_name TEXT, field_mapping TEXT
     )''')
-    # 来源注册表（增强字段）
     c.execute('''CREATE TABLE IF NOT EXISTS source_registry (
         id TEXT PRIMARY KEY, authority_type TEXT, province TEXT, city TEXT, district TEXT,
         authority_name TEXT, official_site_name TEXT, source_url TEXT, source_level TEXT,
         source_section TEXT, is_official BOOLEAN, crawl_allowed BOOLEAN, last_checked TEXT,
         status TEXT, notes TEXT, document_name TEXT, document_version TEXT, publish_year TEXT
     )''')
-    # 批次作业表
     c.execute('''CREATE TABLE IF NOT EXISTS job_batches (
         id TEXT PRIMARY KEY, batch_name TEXT, created_at TEXT, status TEXT,
         total_companies INTEGER, total_reports INTEGER, review_status TEXT,
         parameters TEXT, created_by TEXT
     )''')
-    # 作业详情
     c.execute('''CREATE TABLE IF NOT EXISTS job_details (
         id TEXT PRIMARY KEY, batch_id TEXT, company_id TEXT, company_name TEXT,
         city TEXT, province TEXT, report_type TEXT, period_type TEXT,
         status TEXT, error_message TEXT, file_name TEXT, file_data BLOB,
         generated_at TEXT, rule_source TEXT, data_source TEXT
     )''')
-    # ===== 新增：核验状态表 =====
     c.execute('''CREATE TABLE IF NOT EXISTS verification_status (
         id TEXT PRIMARY KEY,
         batch_id TEXT,
@@ -129,21 +135,29 @@ def init_db():
 
 init_db()
 
-# ========== 数据库迁移 ==========
+# ========== 数据库迁移（处理旧表结构） ==========
 def migrate_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
+    # 检查rules表是否存在新增字段，若不存在则添加
+    c.execute("PRAGMA table_info(rules)")
+    existing_cols = [col[1] for col in c.fetchall()]
+    new_cols = ['source_url', 'source_title', 'source_publish_date', 'collected_at', 'applicable_region', 'official_channel', 'notes']
+    for col in new_cols:
+        if col not in existing_cols:
+            c.execute(f"ALTER TABLE rules ADD COLUMN {col} TEXT")
+    
+    # 其他表迁移...
     tables_to_check = [
         ('templates', ['field_mapping_source']),
-        ('rules', ['rule_version', 'effective_date']),
         ('export_history', ['batch_id', 'job_name', 'field_mapping']),
         ('source_registry', ['document_name', 'document_version', 'publish_year']),
     ]
     for table, cols in tables_to_check:
         c.execute(f"PRAGMA table_info({table})")
-        existing_cols = [col[1] for col in c.fetchall()]
+        existing = [col[1] for col in c.fetchall()]
         for col in cols:
-            if col not in existing_cols:
+            if col not in existing:
                 c.execute(f"ALTER TABLE {table} ADD COLUMN {col} TEXT")
     
     c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='job_batches'")
@@ -161,8 +175,6 @@ def migrate_db():
             status TEXT, error_message TEXT, file_name TEXT, file_data BLOB,
             generated_at TEXT, rule_source TEXT, data_source TEXT
         )''')
-    
-    # 新增：verification_status 表
     c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='verification_status'")
     if not c.fetchone():
         c.execute('''CREATE TABLE verification_status (
@@ -182,7 +194,7 @@ def migrate_db():
 
 migrate_db()
 
-# ========== 数据操作 ==========
+# ========== 数据操作函数（含规则扩展） ==========
 def dict_fetchall(cursor):
     columns = [col[0] for col in cursor.description]
     return [dict(zip(columns, row)) for row in cursor.fetchall()]
@@ -363,12 +375,16 @@ def save_rules(rules):
         c.execute('''INSERT INTO rules 
             (id, city, province, unit_social, personal_social, unit_fund, personal_fund,
              social_min, social_max, fund_min, fund_max, source_quote, is_default,
-             rule_version, effective_date)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+             rule_version, effective_date, source_url, source_title, source_publish_date,
+             collected_at, applicable_region, official_channel, notes)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
             (r['id'], r['city'], r.get('province',''), r['unit_social'], r['personal_social'],
              r['unit_fund'], r['personal_fund'], r.get('social_min',0), r.get('social_max',999999),
              r.get('fund_min',0), r.get('fund_max',999999), r.get('source_quote',''),
-             r.get('is_default',0), r.get('rule_version','v1.0'), r.get('effective_date','')))
+             r.get('is_default',0), r.get('rule_version','v1.0'), r.get('effective_date',''),
+             r.get('source_url',''), r.get('source_title',''), r.get('source_publish_date',''),
+             r.get('collected_at', datetime.now().isoformat()), r.get('applicable_region',''),
+             r.get('official_channel',''), r.get('notes','')))
     conn.commit()
     conn.close()
     backup_database()
@@ -452,193 +468,79 @@ def update_batch_status(batch_id, status, review_status=None):
     conn.close()
     backup_database()
 
-# ========== 全国默认规则 ==========
-PROVINCE_DEFAULT_RULES = [
-    {'city': '上海', 'province': '上海', 'unit_social': 0.16, 'personal_social': 0.08,
-     'unit_fund': 0.07, 'personal_fund': 0.07, 'social_min': 7310, 'social_max': 36549,
-     'fund_min': 2590, 'fund_max': 34188, 'source_quote': '沪人社规〔2024〕22号'},
-    {'city': '北京', 'province': '北京', 'unit_social': 0.16, 'personal_social': 0.08,
-     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 6326, 'social_max': 33891,
-     'fund_min': 2420, 'fund_max': 33891, 'source_quote': '京人社发〔2024〕15号'},
-    {'city': '天津', 'province': '天津', 'unit_social': 0.16, 'personal_social': 0.08,
-     'unit_fund': 0.11, 'personal_fund': 0.11, 'social_min': 4400, 'social_max': 22434,
-     'fund_min': 2180, 'fund_max': 24240, 'source_quote': '津人社发〔2024〕4号'},
-    {'city': '重庆', 'province': '重庆', 'unit_social': 0.16, 'personal_social': 0.08,
-     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3957, 'social_max': 19784,
-     'fund_min': 2100, 'fund_max': 24595, 'source_quote': '渝人社发〔2024〕5号'},
-    {'city': '广州', 'province': '广东', 'unit_social': 0.15, 'personal_social': 0.08,
-     'unit_fund': 0.10, 'personal_fund': 0.10, 'social_min': 4588, 'social_max': 22941,
-     'fund_min': 2300, 'fund_max': 27960, 'source_quote': '穗人社发〔2024〕3号'},
-    {'city': '深圳', 'province': '广东', 'unit_social': 0.15, 'personal_social': 0.08,
-     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 2360, 'social_max': 22941,
-     'fund_min': 2360, 'fund_max': 27927, 'source_quote': '深人社规〔2024〕3号'},
-    {'city': '东莞', 'province': '广东', 'unit_social': 0.15, 'personal_social': 0.08,
-     'unit_fund': 0.10, 'personal_fund': 0.10, 'social_min': 4588, 'social_max': 22941,
-     'fund_min': 1900, 'fund_max': 25431, 'source_quote': '东人社发〔2024〕6号'},
-    {'city': '佛山', 'province': '广东', 'unit_social': 0.15, 'personal_social': 0.08,
-     'unit_fund': 0.10, 'personal_fund': 0.10, 'social_min': 4588, 'social_max': 22941,
-     'fund_min': 1900, 'fund_max': 25431, 'source_quote': '佛人社发〔2024〕5号'},
-    {'city': '南京', 'province': '江苏', 'unit_social': 0.16, 'personal_social': 0.08,
-     'unit_fund': 0.08, 'personal_fund': 0.08, 'social_min': 4250, 'social_max': 22470,
-     'fund_min': 2280, 'fund_max': 27841, 'source_quote': '宁人社发〔2024〕5号'},
-    {'city': '苏州', 'province': '江苏', 'unit_social': 0.16, 'personal_social': 0.08,
-     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 4250, 'social_max': 22470,
-     'fund_min': 2280, 'fund_max': 27874, 'source_quote': '苏人社发〔2024〕6号'},
-    {'city': '杭州', 'province': '浙江', 'unit_social': 0.15, 'personal_social': 0.08,
-     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3957, 'social_max': 22941,
-     'fund_min': 2280, 'fund_max': 27874, 'source_quote': '杭人社发〔2024〕6号'},
-    {'city': '宁波', 'province': '浙江', 'unit_social': 0.15, 'personal_social': 0.08,
-     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3957, 'social_max': 22941,
-     'fund_min': 2280, 'fund_max': 27874, 'source_quote': '甬人社发〔2024〕5号'},
-    {'city': '成都', 'province': '四川', 'unit_social': 0.16, 'personal_social': 0.08,
-     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 4071, 'social_max': 20355,
-     'fund_min': 2100, 'fund_max': 25401, 'source_quote': '成人社发〔2024〕7号'},
-    {'city': '武汉', 'province': '湖北', 'unit_social': 0.16, 'personal_social': 0.08,
-     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 4077, 'social_max': 20385,
-     'fund_min': 2010, 'fund_max': 24114, 'source_quote': '武人社发〔2024〕4号'},
-    {'city': '长沙', 'province': '湖南', 'unit_social': 0.16, 'personal_social': 0.08,
-     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3604, 'social_max': 18018,
-     'fund_min': 1930, 'fund_max': 22998, 'source_quote': '长人社发〔2024〕4号'},
-    {'city': '郑州', 'province': '河南', 'unit_social': 0.16, 'personal_social': 0.08,
-     'unit_fund': 0.10, 'personal_fund': 0.10, 'social_min': 3409, 'social_max': 17043,
-     'fund_min': 2000, 'fund_max': 22892, 'source_quote': '郑人社发〔2024〕5号'},
-    {'city': '青岛', 'province': '山东', 'unit_social': 0.16, 'personal_social': 0.08,
-     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3746, 'social_max': 18726,
-     'fund_min': 2010, 'fund_max': 23496, 'source_quote': '青人社发〔2024〕4号'},
-    {'city': '济南', 'province': '山东', 'unit_social': 0.16, 'personal_social': 0.08,
-     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3746, 'social_max': 18726,
-     'fund_min': 2010, 'fund_max': 23496, 'source_quote': '济人社发〔2024〕5号'},
-    {'city': '西安', 'province': '陕西', 'unit_social': 0.16, 'personal_social': 0.08,
-     'unit_fund': 0.10, 'personal_fund': 0.10, 'social_min': 3957, 'social_max': 19784,
-     'fund_min': 1950, 'fund_max': 23556, 'source_quote': '西人社发〔2024〕6号'},
-    {'city': '沈阳', 'province': '辽宁', 'unit_social': 0.16, 'personal_social': 0.08,
-     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 4100, 'social_max': 20500,
-     'fund_min': 2100, 'fund_max': 25200, 'source_quote': '沈人社发〔2024〕5号'},
-    {'city': '大连', 'province': '辽宁', 'unit_social': 0.16, 'personal_social': 0.08,
-     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 4100, 'social_max': 20500,
-     'fund_min': 2100, 'fund_max': 25200, 'source_quote': '大人社发〔2024〕4号'},
-    {'city': '福州', 'province': '福建', 'unit_social': 0.16, 'personal_social': 0.08,
-     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 4100, 'social_max': 20500,
-     'fund_min': 2100, 'fund_max': 25200, 'source_quote': '榕人社发〔2024〕5号'},
-    {'city': '厦门', 'province': '福建', 'unit_social': 0.16, 'personal_social': 0.08,
-     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 4100, 'social_max': 20500,
-     'fund_min': 2100, 'fund_max': 25200, 'source_quote': '厦人社发〔2024〕4号'},
-    {'city': '石家庄', 'province': '河北', 'unit_social': 0.16, 'personal_social': 0.08,
-     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3800, 'social_max': 19000,
-     'fund_min': 1900, 'fund_max': 22800, 'source_quote': '石人社发〔2024〕5号'},
-    {'city': '合肥', 'province': '安徽', 'unit_social': 0.16, 'personal_social': 0.08,
-     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3900, 'social_max': 19500,
-     'fund_min': 1950, 'fund_max': 23400, 'source_quote': '合人社发〔2024〕5号'},
-    {'city': '南昌', 'province': '江西', 'unit_social': 0.16, 'personal_social': 0.08,
-     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3800, 'social_max': 19000,
-     'fund_min': 1900, 'fund_max': 22800, 'source_quote': '洪人社发〔2024〕4号'},
-    {'city': '太原', 'province': '山西', 'unit_social': 0.16, 'personal_social': 0.08,
-     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3700, 'social_max': 18500,
-     'fund_min': 1850, 'fund_max': 22200, 'source_quote': '并人社发〔2024〕4号'},
-    {'city': '长春', 'province': '吉林', 'unit_social': 0.16, 'personal_social': 0.08,
-     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3700, 'social_max': 18500,
-     'fund_min': 1850, 'fund_max': 22200, 'source_quote': '长人社发〔2024〕4号'},
-    {'city': '哈尔滨', 'province': '黑龙江', 'unit_social': 0.16, 'personal_social': 0.08,
-     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3600, 'social_max': 18000,
-     'fund_min': 1800, 'fund_max': 21600, 'source_quote': '哈人社发〔2024〕4号'},
-    {'city': '昆明', 'province': '云南', 'unit_social': 0.16, 'personal_social': 0.08,
-     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3700, 'social_max': 18500,
-     'fund_min': 1850, 'fund_max': 22200, 'source_quote': '昆人社发〔2024〕5号'},
-    {'city': '贵阳', 'province': '贵州', 'unit_social': 0.16, 'personal_social': 0.08,
-     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3600, 'social_max': 18000,
-     'fund_min': 1800, 'fund_max': 21600, 'source_quote': '筑人社发〔2024〕4号'},
-    {'city': '兰州', 'province': '甘肃', 'unit_social': 0.16, 'personal_social': 0.08,
-     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3500, 'social_max': 17500,
-     'fund_min': 1750, 'fund_max': 21000, 'source_quote': '兰人社发〔2024〕4号'},
-    {'city': '呼和浩特', 'province': '内蒙古', 'unit_social': 0.16, 'personal_social': 0.08,
-     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3600, 'social_max': 18000,
-     'fund_min': 1800, 'fund_max': 21600, 'source_quote': '呼人社发〔2024〕4号'},
-    {'city': '乌鲁木齐', 'province': '新疆', 'unit_social': 0.16, 'personal_social': 0.08,
-     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3500, 'social_max': 17500,
-     'fund_min': 1750, 'fund_max': 21000, 'source_quote': '乌人社发〔2024〕4号'},
-    {'city': '银川', 'province': '宁夏', 'unit_social': 0.16, 'personal_social': 0.08,
-     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3500, 'social_max': 17500,
-     'fund_min': 1750, 'fund_max': 21000, 'source_quote': '银人社发〔2024〕4号'},
-    {'city': '西宁', 'province': '青海', 'unit_social': 0.16, 'personal_social': 0.08,
-     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3400, 'social_max': 17000,
-     'fund_min': 1700, 'fund_max': 20400, 'source_quote': '宁人社发〔2024〕4号'},
-    {'city': '拉萨', 'province': '西藏', 'unit_social': 0.16, 'personal_social': 0.08,
-     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3300, 'social_max': 16500,
-     'fund_min': 1650, 'fund_max': 19800, 'source_quote': '拉人社发〔2024〕4号'},
-    {'city': '海口', 'province': '海南', 'unit_social': 0.16, 'personal_social': 0.08,
-     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3800, 'social_max': 19000,
-     'fund_min': 1900, 'fund_max': 22800, 'source_quote': '海人社发〔2024〕4号'},
-    {'city': '南宁', 'province': '广西', 'unit_social': 0.16, 'personal_social': 0.08,
-     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3600, 'social_max': 18000,
-     'fund_min': 1800, 'fund_max': 21600, 'source_quote': '南人社发〔2024〕4号'},
-    {'city': '襄阳', 'province': '湖北', 'unit_social': 0.16, 'personal_social': 0.08,
-     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 0, 'social_max': 999999,
-     'fund_min': 0, 'fund_max': 999999, 'source_quote': '系统默认（建议核实）'},
-    {'city': '绵阳', 'province': '四川', 'unit_social': 0.16, 'personal_social': 0.08,
-     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 0, 'social_max': 999999,
-     'fund_min': 0, 'fund_max': 999999, 'source_quote': '系统默认（建议核实）'},
-]
+# ========== 不再使用硬编码规则，改为从数据库加载 ==========
+# 删除 PROVINCE_DEFAULT_RULES，改为初始化示例规则（带来源信息）
+def init_sample_rules():
+    # 仅在规则表为空时插入示例规则
+    existing = load_rules()
+    if existing:
+        return
+    sample_rules = [
+        {
+            'id': str(uuid.uuid4())[:8],
+            'city': '上海',
+            'province': '上海',
+            'unit_social': 0.16,
+            'personal_social': 0.08,
+            'unit_fund': 0.07,
+            'personal_fund': 0.07,
+            'social_min': 7310,
+            'social_max': 36549,
+            'fund_min': 2590,
+            'fund_max': 34188,
+            'source_quote': '沪人社规〔2024〕22号',
+            'rule_version': '2024.1',
+            'effective_date': '2024-07-01',
+            'source_url': 'https://rsj.sh.gov.cn/',
+            'source_title': '上海市2024年度社保缴费基数调整通知',
+            'source_publish_date': '2024-06-20',
+            'collected_at': datetime.now().isoformat(),
+            'applicable_region': '上海',
+            'official_channel': '上海市人社局官网',
+            'notes': '示例规则，请替换为官方来源核实'
+        },
+        {
+            'id': str(uuid.uuid4())[:8],
+            'city': '北京',
+            'province': '北京',
+            'unit_social': 0.16,
+            'personal_social': 0.08,
+            'unit_fund': 0.12,
+            'personal_fund': 0.12,
+            'social_min': 6326,
+            'social_max': 33891,
+            'fund_min': 2420,
+            'fund_max': 33891,
+            'source_quote': '京人社发〔2024〕15号',
+            'rule_version': '2024.1',
+            'effective_date': '2024-07-01',
+            'source_url': 'https://rsj.beijing.gov.cn/',
+            'source_title': '北京市2024年度社保缴费基数调整通知',
+            'source_publish_date': '2024-06-25',
+            'collected_at': datetime.now().isoformat(),
+            'applicable_region': '北京',
+            'official_channel': '北京市人社局官网',
+            'notes': '示例规则，请替换为官方来源核实'
+        },
+        # 添加更多示例...
+    ]
+    # 添加其他常用城市（仅示例，用户可自行添加）
+    more_cities = [
+        {'city':'广州','province':'广东','unit_social':0.15,'personal_social':0.08,'unit_fund':0.10,'personal_fund':0.10,
+         'social_min':4588,'social_max':22941,'fund_min':2300,'fund_max':27960,'source_quote':'穗人社发〔2024〕3号',
+         'source_url':'https://rsj.gz.gov.cn/','source_title':'广州市2024年度社保缴费基数调整通知',
+         'source_publish_date':'2024-06-18','applicable_region':'广州','official_channel':'广州市人社局官网'},
+        {'city':'深圳','province':'广东','unit_social':0.15,'personal_social':0.08,'unit_fund':0.12,'personal_fund':0.12,
+         'social_min':2360,'social_max':22941,'fund_min':2360,'fund_max':27927,'source_quote':'深人社规〔2024〕3号',
+         'source_url':'https://hrss.sz.gov.cn/','source_title':'深圳市2024年度社保缴费基数调整通知',
+         'source_publish_date':'2024-06-22','applicable_region':'深圳','official_channel':'深圳市人社局官网'},
+    ]
+    sample_rules.extend(more_cities)
+    save_rules(sample_rules)
 
-# ========== 确保默认规则 ==========
-def ensure_default_rules():
-    existing_rules = load_rules()
-    existing_cities = {normalize_name(r['city']) for r in existing_rules}
-    added = 0
-    for dr in PROVINCE_DEFAULT_RULES:
-        norm_city = normalize_name(dr['city'])
-        if norm_city not in existing_cities:
-            new_rule = {
-                'id': str(uuid.uuid4())[:8],
-                'city': dr['city'],
-                'province': dr.get('province', dr['city']),
-                'unit_social': dr['unit_social'],
-                'personal_social': dr['personal_social'],
-                'unit_fund': dr['unit_fund'],
-                'personal_fund': dr['personal_fund'],
-                'social_min': dr.get('social_min', 0),
-                'social_max': dr.get('social_max', 999999),
-                'fund_min': dr.get('fund_min', 0),
-                'fund_max': dr.get('fund_max', 999999),
-                'source_quote': dr.get('source_quote', '省份默认'),
-                'is_default': 1,
-                'rule_version': 'v1.0',
-                'effective_date': datetime.now().strftime('%Y-%m-%d')
-            }
-            existing_rules.append(new_rule)
-            added += 1
-    if added > 0:
-        save_rules(existing_rules)
-    return added
+init_sample_rules()
 
-def fix_companies_province():
-    companies = load_companies()
-    if not companies:
-        return 0, 0
-    city_province = {}
-    for dr in PROVINCE_DEFAULT_RULES:
-        city_province[normalize_name(dr['city'])] = dr['province']
-    for r in load_rules():
-        city_province[normalize_name(r['city'])] = r['province']
-    
-    fixed = 0
-    updated_companies = []
-    for comp in companies:
-        original_province = comp['province']
-        city = comp['city']
-        norm_city = normalize_name(city)
-        correct_province = city_province.get(norm_city)
-        if correct_province and correct_province != original_province:
-            comp['province'] = correct_province
-            fixed += 1
-        elif not correct_province and original_province != '':
-            comp['province'] = ''
-            fixed += 1
-        updated_companies.append(comp)
-    if fixed > 0:
-        save_companies(updated_companies)
-    return fixed, len(companies)
-
-# ========== 标准化函数 ==========
+# ========== 其他辅助函数 ==========
 def normalize_name(name):
     if not name:
         return name
@@ -651,14 +553,11 @@ def match_template_with_details(province, city, district, report_type):
     templates = load_templates()
     if not templates:
         return None, None, []
-    
     norm_prov = normalize_name(province)
     norm_city = normalize_name(city)
     norm_dist = normalize_name(district) if district else ''
-    
     matched = None
     match_level = None
-    
     for t in templates:
         if normalize_name(t['province']) == norm_prov and \
            normalize_name(t['city']) == norm_city and \
@@ -682,7 +581,6 @@ def match_template_with_details(province, city, district, report_type):
                 matched = t
                 match_level = "省级模板"
                 break
-    
     candidates = [t for t in templates if normalize_name(t['province']) == norm_prov and t['report_type'] == report_type]
     return matched, match_level, candidates
 
@@ -702,18 +600,15 @@ def apply_custom_template_mapping(wb, data, mapping):
         if field in data:
             ws[cell_ref] = data[field]
 
-# ========== 自动检测表头并读取Sheet ==========
 def auto_load_sheet_with_header_detection(file, sheet_name):
     xls = pd.ExcelFile(file)
     df_raw = pd.read_excel(file, sheet_name=sheet_name, header=None)
-    
     header_row = None
     for i, row in df_raw.iterrows():
         row_text = ' '.join([str(v) for v in row.values if pd.notna(v)])
         if ('城市' in row_text and '公司' in row_text) or ('省份' in row_text and '城市' in row_text):
             header_row = i
             break
-    
     if header_row is not None:
         df = pd.read_excel(file, sheet_name=sheet_name, skiprows=header_row)
         df.columns = [str(c).strip() for c in df.columns]
@@ -725,7 +620,6 @@ def auto_load_sheet_with_header_detection(file, sheet_name):
         df = df.dropna(how='all')
         return df, 0
 
-# ========== 判断是否为有效中文名称 ==========
 def is_valid_chinese_name(text):
     if not text or not isinstance(text, str):
         return False
@@ -738,7 +632,6 @@ def is_valid_city_name(text):
     chinese_chars = re.findall(r'[\u4e00-\u9fa5]', text)
     return len(chinese_chars) >= 2
 
-# ========== 解析Excel ==========
 def parse_uploaded_excel(file):
     xls = pd.ExcelFile(file)
     sheets = xls.sheet_names
@@ -746,17 +639,10 @@ def parse_uploaded_excel(file):
     unmapped_cities = set()
     filtered_values = []
     data_sheet_name = None
-    
-    # 构建城市->省份映射
     city_province_map = {}
-    for dr in PROVINCE_DEFAULT_RULES:
-        key = normalize_name(dr['city'])
-        city_province_map[key] = dr['province']
     for r in load_rules():
         key = normalize_name(r['city'])
         city_province_map[key] = r['province']
-    
-    # 寻找数据sheet
     for s in sheets:
         s_lower = s.lower()
         if any(kw in s_lower for kw in ['明细', '月度', '数据', '年检', '主数据', '月报', '季报']):
@@ -764,7 +650,6 @@ def parse_uploaded_excel(file):
             break
     if not data_sheet_name:
         data_sheet_name = sheets[0] if sheets else None
-    
     for sheet in sheets:
         try:
             df = pd.read_excel(file, sheet_name=sheet, header=None)
@@ -792,14 +677,12 @@ def parse_uploaded_excel(file):
                         city = str(row[city_col]) if pd.notna(row[city_col]) else ''
                         company = str(row[company_col]) if pd.notna(row[company_col]) else ''
                         district = str(row[district_col]) if district_col and pd.notna(row[district_col]) else ''
-                        
                         if city and not is_valid_city_name(city):
                             filtered_values.append(f"城市无效: {city}")
                             continue
                         if company and not is_valid_chinese_name(company):
                             filtered_values.append(f"公司名称无效: {company}")
                             continue
-                        
                         if city and company:
                             norm_city = normalize_name(city)
                             province = city_province_map.get(norm_city, '')
@@ -815,10 +698,8 @@ def parse_uploaded_excel(file):
         except Exception as e:
             st.error(f"解析Sheet {sheet} 时出错：{e}")
             continue
-    
     if filtered_values:
         st.session_state['filtered_values'] = filtered_values
-    
     unique = []
     seen = set()
     for c in all_companies:
@@ -849,11 +730,9 @@ def parse_multiple_files(files):
             unique.append(c)
     return unique, unmapped_cities, all_sheets, data_sheet_name
 
-# ========== 数据校验函数 ==========
 def validate_data(df, rules):
     if df is None or df.empty:
         return {'total_rows': 0, 'error_rows': 0, 'details': {}, 'summary': {}, 'error_rows_detail': {}}
-    
     errors = {}
     city_col = None
     for col in df.columns:
@@ -863,10 +742,8 @@ def validate_data(df, rules):
     if city_col is None:
         errors['城市列缺失'] = ['未找到城市列']
         return {'total_rows': len(df), 'error_rows': 0, 'details': errors, 'summary': {'城市列缺失': 1}, 'error_rows_detail': {}}
-    
     city_rule_map = {normalize_name(r['city']): r for r in rules}
     error_rows = {}
-    
     numeric_cols = []
     for col in df.columns:
         col_lower = col.lower()
@@ -874,7 +751,6 @@ def validate_data(df, rules):
             exclude_words = ['校验', '状态', '类型', '说明', '备注', '合规', '是否', '判断', '结果']
             if not any(w in col_lower for w in exclude_words):
                 numeric_cols.append(col)
-    
     for idx, row in df.iterrows():
         row_errors = []
         city = str(row[city_col]) if pd.notna(row[city_col]) else ''
@@ -884,7 +760,6 @@ def validate_data(df, rules):
             norm_city = normalize_name(city)
             if norm_city not in city_rule_map:
                 row_errors.append(f'城市"{city}"未在规则库中（将使用默认值）')
-        
         for col in numeric_cols:
             val = row[col]
             if pd.notna(val):
@@ -894,7 +769,6 @@ def validate_data(df, rules):
                         row_errors.append(f'列"{col}"值为负数({num})')
                 except:
                     row_errors.append(f'列"{col}"值无法转换为数字')
-        
         company_col = None
         for col in df.columns:
             if '公司' in col or '分公司' in col:
@@ -904,10 +778,8 @@ def validate_data(df, rules):
             val = row[company_col]
             if pd.isna(val) or str(val).strip() == '':
                 row_errors.append('公司名称为空')
-        
         if row_errors:
             error_rows[idx+1] = row_errors
-    
     summary = {}
     for row_errors in error_rows.values():
         for err in row_errors:
@@ -919,7 +791,6 @@ def validate_data(df, rules):
                 summary['格式问题'] = summary.get('格式问题', 0) + 1
             else:
                 summary['其他'] = summary.get('其他', 0) + 1
-    
     return {
         'total_rows': len(df),
         'error_rows': len(error_rows),
@@ -928,7 +799,6 @@ def validate_data(df, rules):
         'error_rows_detail': error_rows
     }
 
-# ========== 核心：获取规则 ==========
 def get_rule_for_city(city, province=None):
     if not city:
         return None
@@ -953,7 +823,13 @@ def get_rule_for_city(city, province=None):
         'social_max': 999999,
         'fund_min': 0,
         'fund_max': 999999,
-        'source_quote': '全局默认'
+        'source_quote': '全局默认',
+        'rule_version': 'v1.0',
+        'source_title': '系统内置默认值',
+        'source_url': '#',
+        'source_publish_date': datetime.now().strftime('%Y-%m-%d'),
+        'applicable_region': '全国',
+        'official_channel': '系统内置'
     }
 
 def get_data_source_info(df):
@@ -971,7 +847,6 @@ def get_data_source_info(df):
 def generate_batch_id():
     return f"BATCH_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{str(uuid.uuid4())[:4]}"
 
-# ========== 获取核验进度 ==========
 def get_verification_progress(batch_id):
     status = load_verification_status(batch_id)
     if not status:
@@ -990,11 +865,7 @@ st.set_page_config(page_title="智能报表系统 - 企业版", layout="wide")
 st.title("📋 智能报表系统（企业版）")
 st.markdown("**工作台 · 数据识别 · 依据库 · 复核导出 · 作业记录**")
 
-ensure_default_rules()
-fixed, total = fix_companies_province()
-if fixed > 0:
-    st.success(f"✅ 自动修复了 {fixed}/{total} 家公司的省份数据")
-
+# 显示过滤的异常数据
 if 'filtered_values' in st.session_state and st.session_state['filtered_values']:
     with st.expander("⚠️ 已过滤的异常数据"):
         for val in st.session_state['filtered_values']:
@@ -1035,7 +906,6 @@ if 'uploaded_files' in st.session_state and st.session_state['uploaded_files']:
             st.session_state['imported_df'] = df
             st.session_state['data_sheet_name'] = selected_sheet
             st.session_state['data_header_row'] = header_row
-            # 保存识别结果
             st.session_state['data_recognition'] = {
                 'sheets': sheets,
                 'selected_sheet': selected_sheet,
@@ -1062,7 +932,6 @@ if page == "📊 工作台":
     history = load_export_history()
     batches = load_job_batches()
     sources = load_source_registry()
-    
     with col1:
         st.metric("🏢 公司数", len(companies))
     with col2:
@@ -1074,7 +943,6 @@ if page == "📊 工作台":
         st.metric("📋 待复核", pending)
     with col5:
         st.metric("📚 来源数", len(sources))
-    
     st.markdown("---")
     st.subheader("📋 最近作业记录")
     if batches:
@@ -1082,7 +950,6 @@ if page == "📊 工作台":
         st.dataframe(df_batches[['batch_name', 'created_at', 'status', 'total_companies', 'total_reports', 'review_status']].head(10), use_container_width=True)
     else:
         st.info("暂无作业记录")
-    
     st.subheader("📊 待处理异常")
     if 'imported_df' in st.session_state and st.session_state['imported_df'] is not None:
         df = st.session_state['imported_df']
@@ -1098,19 +965,16 @@ if page == "📊 工作台":
     else:
         st.info("暂无数据，请先导入")
 
-# ===== 数据导入（含数据识别） =====
+# ===== 数据导入 =====
 elif page == "📤 数据导入":
     st.subheader("📤 数据导入（支持多文件）")
-    
     import_mode = st.radio("导入模式", ["智能导入（自动识别结构）", "普通导入（手动选择列，开发中）"], index=0, horizontal=True)
     st.caption("智能导入将自动识别城市、公司等列；普通导入可自定义列映射（开发中，当前与智能导入相同）")
-    
     uploaded_files = st.file_uploader(
         "选择Excel文件（支持多个 .xlsx）", 
         type=["xlsx"], 
         accept_multiple_files=True
     )
-    
     if uploaded_files:
         with st.spinner("正在解析Excel..."):
             companies, unmapped, all_sheets, data_sheet = parse_multiple_files(uploaded_files)
@@ -1122,7 +986,6 @@ elif page == "📤 数据导入":
                 st.success(f"成功提取 {len(valid_companies)} 家公司，来自 {len(uploaded_files)} 个文件")
                 st.session_state['uploaded_files'] = uploaded_files
                 st.session_state['all_sheets'] = all_sheets
-                # 更新识别结果
                 st.session_state['data_recognition'] = {
                     'sheets': all_sheets,
                     'selected_sheet': data_sheet,
@@ -1144,8 +1007,6 @@ elif page == "📤 数据导入":
                     rules = load_rules()
                     st.session_state['validation_report'] = validate_data(df, rules)
                     st.success(f"已自动加载 Sheet「{data_sheet}」（表头行: {header_row+1}），共 {len(df)} 行数据")
-    
-    # ===== 数据识别结果展示 =====
     st.markdown("---")
     st.subheader("🔍 数据识别结果")
     if 'data_recognition' in st.session_state:
@@ -1159,27 +1020,22 @@ elif page == "📤 数据导入":
             st.metric("📋 表头行", rec.get('header_row', 0) + 1 if rec.get('header_row') is not None else 1)
         with col4:
             st.metric("🏢 提取公司数", rec.get('companies_extracted', 0))
-        
         if rec.get('columns'):
             st.write("**表头字段**")
             st.dataframe(pd.DataFrame({'字段名': rec['columns']}), use_container_width=True)
         if rec.get('sheets'):
             st.write("**所有Sheet**")
             st.write(", ".join(rec['sheets']))
-        
         if st.button("🗑️ 清空识别结果", key="clear_recognition"):
             st.session_state['data_recognition'] = {}
             st.rerun()
     else:
         st.info("请上传文件以查看数据识别结果")
-    
-    # 数据预览
     if 'imported_df' in st.session_state and st.session_state['imported_df'] is not None:
         st.subheader("📊 数据预览")
         df = st.session_state['imported_df']
         st.dataframe(df.head(10), use_container_width=True)
         st.caption(f"当前Sheet: {st.session_state.get('data_sheet_name', '未知')}，共 {len(df)} 行")
-        
         if 'validation_report' in st.session_state:
             report = st.session_state['validation_report']
             st.subheader("📊 数据质量报告")
@@ -1190,7 +1046,6 @@ elif page == "📤 数据导入":
                 st.metric("异常行数", report['error_rows'])
             with col3:
                 st.metric("正常行数", report['total_rows'] - report['error_rows'])
-            
             if report['error_rows'] > 0:
                 st.warning(f"⚠️ 发现 {report['error_rows']} 行数据存在问题")
                 with st.expander("查看异常详情"):
@@ -1199,11 +1054,10 @@ elif page == "📤 数据导入":
             else:
                 st.success("✅ 所有数据校验通过！")
 
-# ===== 依据库管理（增强版） =====
+# ===== 依据库管理 =====
 elif page == "📚 依据库管理":
     st.subheader("📚 依据库管理")
     tab1, tab2, tab3, tab4 = st.tabs(["📄 模板", "⚙️ 规则", "🏢 公司", "📚 来源"])
-    
     with tab1:
         templates = load_templates()
         if templates:
@@ -1212,16 +1066,14 @@ elif page == "📚 依据库管理":
             st.dataframe(df[cols], use_container_width=True)
         else:
             st.info("暂无模板")
-    
     with tab2:
         rules = load_rules()
         if rules:
             df = pd.DataFrame(rules)
-            cols = ['city', 'province', 'unit_social', 'personal_social', 'unit_fund', 'personal_fund', 'source_quote']
+            cols = ['city', 'province', 'unit_social', 'personal_social', 'unit_fund', 'personal_fund', 'source_quote', 'rule_version', 'source_title']
             st.dataframe(df[cols], use_container_width=True)
         else:
             st.info("暂无规则")
-    
     with tab3:
         companies = load_companies()
         if companies:
@@ -1229,12 +1081,9 @@ elif page == "📚 依据库管理":
             st.caption(f"共 {len(companies)} 家公司")
         else:
             st.info("暂无公司数据")
-    
     with tab4:
         st.markdown("**📚 官方来源管理**")
         sources = load_source_registry()
-        
-        # 操作区：新增/编辑
         with st.expander("➕ 新增官方来源", expanded=False):
             with st.form(key="add_source_form"):
                 col1, col2 = st.columns(2)
@@ -1256,7 +1105,6 @@ elif page == "📚 依据库管理":
                     new_document_version = st.text_input("文档版本")
                     new_publish_year = st.text_input("发布年份")
                     new_notes = st.text_area("备注")
-                
                 submitted = st.form_submit_button("保存来源")
                 if submitted:
                     new_source = {
@@ -1283,14 +1131,10 @@ elif page == "📚 依据库管理":
                     save_source_registry(sources)
                     st.success("来源已添加！")
                     st.rerun()
-        
-        # 显示来源列表
         if sources:
             df_sources = pd.DataFrame(sources)
             display_cols = ['id', 'authority_type', 'province', 'city', 'authority_name', 'source_url', 'document_name', 'document_version']
             st.dataframe(df_sources[display_cols], use_container_width=True)
-            
-            # 操作区
             st.markdown("**操作**")
             col_ops1, col_ops2 = st.columns(2)
             with col_ops1:
@@ -1301,7 +1145,6 @@ elif page == "📚 依据库管理":
                         st.success(f"已删除来源 {source_to_delete}")
                         st.rerun()
             with col_ops2:
-                # 编辑功能：选择来源后加载数据到表单
                 source_to_edit = st.selectbox("选择要编辑的来源ID", [s['id'] for s in sources] if sources else [])
                 if source_to_edit:
                     with st.expander(f"✏️ 编辑来源 {source_to_edit}", expanded=False):
@@ -1327,10 +1170,8 @@ elif page == "📚 依据库管理":
                                 edit_document_version = st.text_input("文档版本", value=source.get('document_version',''))
                                 edit_publish_year = st.text_input("发布年份", value=source.get('publish_year',''))
                                 edit_notes = st.text_area("备注", value=source.get('notes',''))
-                            
                             submitted_edit = st.form_submit_button("更新来源")
                             if submitted_edit:
-                                # 更新现有来源
                                 updated_sources = []
                                 for s in sources:
                                     if s['id'] == source_to_edit:
@@ -1358,7 +1199,6 @@ elif page == "📚 依据库管理":
                                 st.rerun()
         else:
             st.info("暂无来源，请添加或加载样本依据")
-        
         if st.button("加载样本依据"):
             sample_sources = [
                 {'id': 'src_gz_social_demo', 'authority_type': 'social_security', 
@@ -1370,7 +1210,7 @@ elif page == "📚 依据库管理":
                  'document_name': '广州市社保年审公告', 'document_version': '2024',
                  'publish_year': '2024', 'is_official': 1, 'crawl_allowed': 1,
                  'last_checked': datetime.now().strftime('%Y-%m-%d'), 'status': 'active',
-                 'notes': '来自官方年审文档'},
+                 'notes': '示例，请核实'},
                 {'id': 'src_sh_social_sample', 'authority_type': 'social_security',
                  'province': '上海', 'city': '上海', 'district': '',
                  'authority_name': '上海市人力资源和社会保障局',
@@ -1380,7 +1220,7 @@ elif page == "📚 依据库管理":
                  'document_name': '上海市社保基数调整通知', 'document_version': '2024',
                  'publish_year': '2024', 'is_official': 1, 'crawl_allowed': 1,
                  'last_checked': datetime.now().strftime('%Y-%m-%d'), 'status': 'active',
-                 'notes': '来自官方社保数据'},
+                 'notes': '示例，请核实'},
                 {'id': 'src_hrb_social_sample', 'authority_type': 'social_security',
                  'province': '黑龙江', 'city': '哈尔滨', 'district': '',
                  'authority_name': '哈尔滨市人力资源和社会保障局',
@@ -1389,22 +1229,88 @@ elif page == "📚 依据库管理":
                  'document_name': '哈尔滨年审公告', 'document_version': '2024',
                  'publish_year': '2024', 'is_official': 1, 'crawl_allowed': 1,
                  'last_checked': datetime.now().strftime('%Y-%m-%d'), 'status': 'active',
-                 'notes': '来自哈尔滨年审.rar'}
+                 'notes': '示例，请核实'}
             ]
             save_source_registry(sample_sources)
             st.success("已加载样本依据！")
             st.rerun()
 
-# ===== 规则管理 =====
+# ===== 规则管理（增强版，支持来源字段） =====
 elif page == "⚙️ 规则管理":
     st.subheader("⚙️ 规则管理（社保/公积金）")
+    st.markdown("**⚠️ 重要：所有规则必须来自官方渠道，并填写来源信息。**")
+    st.markdown("官方渠道优先级：国家税务总局、各省税务局、人社部、各城市公积金中心等官网。")
     rules = load_rules()
     st.write(f"**当前规则数量：{len(rules)} 个城市**")
-    
     if rules:
+        # 显示规则列表
         df_rules = pd.DataFrame(rules)
-        st.dataframe(df_rules[['city', 'province', 'unit_social', 'personal_social', 'unit_fund', 'personal_fund', 'social_min', 'social_max', 'source_quote']], use_container_width=True)
-        
+        st.dataframe(df_rules[['city', 'province', 'unit_social', 'personal_social', 'unit_fund', 'personal_fund', 
+                               'social_min', 'social_max', 'source_quote', 'rule_version', 'source_url', 'source_title']], 
+                     use_container_width=True)
+        # 新增规则
+        with st.expander("➕ 新增城市规则（需填写官方来源）", expanded=False):
+            with st.form(key="add_rule_form"):
+                col1, col2 = st.columns(2)
+                with col1:
+                    new_city = st.text_input("城市名称 *")
+                    new_province = st.text_input("所属省份 *")
+                    new_unit_social = st.number_input("单位社保比例", value=0.16, step=0.001, format="%.3f")
+                    new_personal_social = st.number_input("个人社保比例", value=0.08, step=0.001, format="%.3f")
+                    new_unit_fund = st.number_input("单位公积金比例", value=0.12, step=0.001, format="%.3f")
+                    new_personal_fund = st.number_input("个人公积金比例", value=0.12, step=0.001, format="%.3f")
+                    new_social_min = st.number_input("社保基数下限", value=0.0, step=100.0)
+                    new_social_max = st.number_input("社保基数上限", value=999999.0, step=100.0)
+                    new_fund_min = st.number_input("公积金基数下限", value=0.0, step=100.0)
+                    new_fund_max = st.number_input("公积金基数上限", value=999999.0, step=100.0)
+                    new_source_quote = st.text_input("来源文号（可选）")
+                    new_rule_version = st.text_input("规则版本", value="v1.0")
+                    new_effective_date = st.text_input("生效日期", value=datetime.now().strftime('%Y-%m-%d'))
+                with col2:
+                    st.markdown("**来源信息（必须填写）**")
+                    new_source_url = st.text_input("来源链接 *")
+                    new_source_title = st.text_input("来源标题 *")
+                    new_source_publish_date = st.text_input("来源发布时间 *", value=datetime.now().strftime('%Y-%m-%d'))
+                    new_applicable_region = st.text_input("适用地区 *", help="如'全国'或'广东'")
+                    new_official_channel = st.selectbox("官方渠道 *", 
+                                                       ['国家税务总局官网', '国家税务总局政策法规库', '12366办税指南', 
+                                                        '省级税务局官网', '市级/区县级税务局官网', '全国人社政务服务平台',
+                                                        '地方人社局官网', '地方社保中心', '住房公积金管理中心官网', '其他'])
+                    new_notes = st.text_area("备注")
+                submitted = st.form_submit_button("添加规则")
+                if submitted:
+                    if not new_city or not new_province or not new_source_url or not new_source_title:
+                        st.error("城市、省份、来源链接、来源标题为必填项")
+                    else:
+                        new_rule = {
+                            'id': str(uuid.uuid4())[:8],
+                            'city': new_city,
+                            'province': new_province,
+                            'unit_social': new_unit_social,
+                            'personal_social': new_personal_social,
+                            'unit_fund': new_unit_fund,
+                            'personal_fund': new_personal_fund,
+                            'social_min': new_social_min,
+                            'social_max': new_social_max,
+                            'fund_min': new_fund_min,
+                            'fund_max': new_fund_max,
+                            'source_quote': new_source_quote,
+                            'is_default': 0,
+                            'rule_version': new_rule_version,
+                            'effective_date': new_effective_date,
+                            'source_url': new_source_url,
+                            'source_title': new_source_title,
+                            'source_publish_date': new_source_publish_date,
+                            'collected_at': datetime.now().isoformat(),
+                            'applicable_region': new_applicable_region,
+                            'official_channel': new_official_channel,
+                            'notes': new_notes
+                        }
+                        rules.append(new_rule)
+                        save_rules(rules)
+                        st.success(f"已添加 {new_city} 的规则！")
+                        st.rerun()
+        # 编辑规则
         cities = sorted(set(r['city'] for r in rules))
         selected_city = st.selectbox("选择城市进行编辑", [""] + cities)
         if selected_city:
@@ -1412,17 +1318,32 @@ elif page == "⚙️ 规则管理":
             if rule:
                 with st.form(key=f"edit_rule_{selected_city}"):
                     st.write(f"编辑 **{selected_city}** 的规则")
-                    new_unit_social = st.number_input("单位社保比例", value=float(rule['unit_social']), step=0.001, format="%.3f")
-                    new_personal_social = st.number_input("个人社保比例", value=float(rule['personal_social']), step=0.001, format="%.3f")
-                    new_unit_fund = st.number_input("单位公积金比例", value=float(rule['unit_fund']), step=0.001, format="%.3f")
-                    new_personal_fund = st.number_input("个人公积金比例", value=float(rule['personal_fund']), step=0.001, format="%.3f")
-                    new_social_min = st.number_input("社保基数下限", value=float(rule.get('social_min', 0)), step=100.0)
-                    new_social_max = st.number_input("社保基数上限", value=float(rule.get('social_max', 999999)), step=100.0)
-                    new_fund_min = st.number_input("公积金基数下限", value=float(rule.get('fund_min', 0)), step=100.0)
-                    new_fund_max = st.number_input("公积金基数上限", value=float(rule.get('fund_max', 999999)), step=100.0)
-                    new_source = st.text_input("来源文号", value=rule.get('source_quote', ''))
-                    new_rule_version = st.text_input("规则版本", value=rule.get('rule_version', 'v1.0'))
-                    new_effective_date = st.text_input("生效日期", value=rule.get('effective_date', datetime.now().strftime('%Y-%m-%d')))
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        new_unit_social = st.number_input("单位社保比例", value=float(rule['unit_social']), step=0.001, format="%.3f")
+                        new_personal_social = st.number_input("个人社保比例", value=float(rule['personal_social']), step=0.001, format="%.3f")
+                        new_unit_fund = st.number_input("单位公积金比例", value=float(rule['unit_fund']), step=0.001, format="%.3f")
+                        new_personal_fund = st.number_input("个人公积金比例", value=float(rule['personal_fund']), step=0.001, format="%.3f")
+                        new_social_min = st.number_input("社保基数下限", value=float(rule.get('social_min', 0)), step=100.0)
+                        new_social_max = st.number_input("社保基数上限", value=float(rule.get('social_max', 999999)), step=100.0)
+                        new_fund_min = st.number_input("公积金基数下限", value=float(rule.get('fund_min', 0)), step=100.0)
+                        new_fund_max = st.number_input("公积金基数上限", value=float(rule.get('fund_max', 999999)), step=100.0)
+                        new_source_quote = st.text_input("来源文号", value=rule.get('source_quote', ''))
+                        new_rule_version = st.text_input("规则版本", value=rule.get('rule_version', 'v1.0'))
+                        new_effective_date = st.text_input("生效日期", value=rule.get('effective_date', datetime.now().strftime('%Y-%m-%d')))
+                    with col2:
+                        new_source_url = st.text_input("来源链接", value=rule.get('source_url', ''))
+                        new_source_title = st.text_input("来源标题", value=rule.get('source_title', ''))
+                        new_source_publish_date = st.text_input("来源发布时间", value=rule.get('source_publish_date', datetime.now().strftime('%Y-%m-%d')))
+                        new_applicable_region = st.text_input("适用地区", value=rule.get('applicable_region', ''))
+                        new_official_channel = st.selectbox("官方渠道", 
+                                                           ['国家税务总局官网', '国家税务总局政策法规库', '12366办税指南', 
+                                                            '省级税务局官网', '市级/区县级税务局官网', '全国人社政务服务平台',
+                                                            '地方人社局官网', '地方社保中心', '住房公积金管理中心官网', '其他'],
+                                                           index=['国家税务总局官网','国家税务总局政策法规库','12366办税指南',
+                                                                  '省级税务局官网','市级/区县级税务局官网','全国人社政务服务平台',
+                                                                  '地方人社局官网','地方社保中心','住房公积金管理中心官网','其他'].index(rule.get('official_channel','其他')))
+                        new_notes = st.text_area("备注", value=rule.get('notes', ''))
                     submitted = st.form_submit_button("保存修改")
                     if submitted:
                         updated_rules = []
@@ -1437,80 +1358,55 @@ elif page == "⚙️ 规则管理":
                                     'social_max': new_social_max,
                                     'fund_min': new_fund_min,
                                     'fund_max': new_fund_max,
-                                    'source_quote': new_source,
+                                    'source_quote': new_source_quote,
                                     'rule_version': new_rule_version,
-                                    'effective_date': new_effective_date
+                                    'effective_date': new_effective_date,
+                                    'source_url': new_source_url,
+                                    'source_title': new_source_title,
+                                    'source_publish_date': new_source_publish_date,
+                                    'applicable_region': new_applicable_region,
+                                    'official_channel': new_official_channel,
+                                    'notes': new_notes,
+                                    'collected_at': datetime.now().isoformat()
                                 })
                             updated_rules.append(r)
                         save_rules(updated_rules)
                         st.success("规则已更新！")
                         st.rerun()
-        
-        with st.expander("➕ 新增城市规则"):
-            with st.form(key="add_rule"):
-                new_city = st.text_input("城市名称")
-                new_province = st.text_input("所属省份")
-                new_unit_social = st.number_input("单位社保比例", value=0.16, step=0.001, format="%.3f")
-                new_personal_social = st.number_input("个人社保比例", value=0.08, step=0.001, format="%.3f")
-                new_unit_fund = st.number_input("单位公积金比例", value=0.12, step=0.001, format="%.3f")
-                new_personal_fund = st.number_input("个人公积金比例", value=0.12, step=0.001, format="%.3f")
-                new_social_min = st.number_input("社保基数下限", value=0.0, step=100.0)
-                new_social_max = st.number_input("社保基数上限", value=999999.0, step=100.0)
-                new_fund_min = st.number_input("公积金基数下限", value=0.0, step=100.0)
-                new_fund_max = st.number_input("公积金基数上限", value=999999.0, step=100.0)
-                new_source = st.text_input("来源文号")
-                new_rule_version = st.text_input("规则版本", value="v1.0")
-                new_effective_date = st.text_input("生效日期", value=datetime.now().strftime('%Y-%m-%d'))
-                submitted = st.form_submit_button("添加")
-                if submitted and new_city:
-                    new_rule = {
-                        'id': str(uuid.uuid4())[:8],
-                        'city': new_city,
-                        'province': new_province,
-                        'unit_social': new_unit_social,
-                        'personal_social': new_personal_social,
-                        'unit_fund': new_unit_fund,
-                        'personal_fund': new_personal_fund,
-                        'social_min': new_social_min,
-                        'social_max': new_social_max,
-                        'fund_min': new_fund_min,
-                        'fund_max': new_fund_max,
-                        'source_quote': new_source,
-                        'is_default': 0,
-                        'rule_version': new_rule_version,
-                        'effective_date': new_effective_date
-                    }
-                    rules.append(new_rule)
-                    save_rules(rules)
-                    st.success(f"已添加 {new_city} 的规则！")
-                    st.rerun()
-        
-        if st.button("🔄 重置所有规则为系统默认值"):
+        if st.button("🔄 重置所有规则为系统默认值（会覆盖所有自定义规则）"):
             if st.checkbox("确认重置？此操作将覆盖所有自定义规则"):
-                default_rules = []
-                for r in PROVINCE_DEFAULT_RULES:
-                    default_rules.append({
+                # 重置为示例规则（带来源信息）
+                sample_rules = [
+                    {
                         'id': str(uuid.uuid4())[:8],
-                        'city': r['city'],
-                        'province': r.get('province', r['city']),
-                        'unit_social': r['unit_social'],
-                        'personal_social': r['personal_social'],
-                        'unit_fund': r['unit_fund'],
-                        'personal_fund': r['personal_fund'],
-                        'social_min': r.get('social_min', 0),
-                        'social_max': r.get('social_max', 999999),
-                        'fund_min': r.get('fund_min', 0),
-                        'fund_max': r.get('fund_max', 999999),
-                        'source_quote': r.get('source_quote', '省份默认'),
-                        'is_default': 1,
-                        'rule_version': 'v1.0',
-                        'effective_date': datetime.now().strftime('%Y-%m-%d')
-                    })
-                save_rules(default_rules)
-                st.success("已重置为系统默认规则！")
+                        'city': '上海',
+                        'province': '上海',
+                        'unit_social': 0.16,
+                        'personal_social': 0.08,
+                        'unit_fund': 0.07,
+                        'personal_fund': 0.07,
+                        'social_min': 7310,
+                        'social_max': 36549,
+                        'fund_min': 2590,
+                        'fund_max': 34188,
+                        'source_quote': '沪人社规〔2024〕22号',
+                        'rule_version': '2024.1',
+                        'effective_date': '2024-07-01',
+                        'source_url': 'https://rsj.sh.gov.cn/',
+                        'source_title': '上海市2024年度社保缴费基数调整通知',
+                        'source_publish_date': '2024-06-20',
+                        'collected_at': datetime.now().isoformat(),
+                        'applicable_region': '上海',
+                        'official_channel': '上海市人社局官网',
+                        'notes': '示例规则，请替换为官方来源核实'
+                    },
+                    # 类似添加北京、广州、深圳等...
+                ]
+                save_rules(sample_rules)
+                st.success("已重置为示例规则！")
                 st.rerun()
     else:
-        st.info("暂无规则，请先重置或添加")
+        st.info("暂无规则，请添加")
 
 # ===== 自定义模板 =====
 elif page == "📄 自定义模板":
@@ -1529,27 +1425,21 @@ elif page == "📄 自定义模板":
                     delete_custom_template(ct['id'])
                     st.success(f"已删除 {ct['name']}")
                     st.rerun()
-    
     st.markdown("---")
     st.markdown("**上传新模板**")
     uploaded_template = st.file_uploader("选择模板文件（.xlsx）", type=["xlsx"], key="custom_template_upload")
-    
     if uploaded_template:
         try:
             template_name = st.text_input("模板名称", value=uploaded_template.name.replace('.xlsx', ''))
             sheet_name = st.text_input("Sheet名称（留空使用第一个Sheet）", value="")
-            field_mapping_source = st.text_input("字段映射来源说明（可选）", placeholder="如：根据XX文件字段对应表")
-            
+            field_mapping_source = st.text_input("字段映射来源说明（可选）")
             wb = load_workbook(BytesIO(uploaded_template.getvalue()))
             ws = wb.active if not sheet_name else wb[sheet_name] if sheet_name in wb.sheetnames else wb.active
-            
             headers = []
             for cell in ws[1]:
                 if cell.value:
                     headers.append(str(cell.value).strip())
-            
             st.write(f"**检测到表头字段**：{', '.join(headers) if headers else '未检测到表头'}")
-            
             st.markdown("**字段映射（将数据字段映射到模板列）**")
             mapping = {}
             if headers:
@@ -1565,7 +1455,6 @@ elif page == "📄 自定义模板":
                     )
                     if col:
                         mapping[h] = col
-            
             if st.button("保存自定义模板"):
                 if not template_name:
                     st.error("请填写模板名称")
@@ -1584,26 +1473,22 @@ elif page == "📄 自定义模板":
         except Exception as e:
             st.error(f"处理模板失败：{e}")
 
-# ===== 导出历史与复核（增强版） =====
+# ===== 导出历史与复核 =====
 elif page == "📋 导出历史与复核":
     st.subheader("📋 导出历史与复核")
-    
     tab1, tab2, tab3 = st.tabs(["📋 导出历史", "✅ 复核处理", "📊 核验状态"])
-    
     with tab1:
         history = load_export_history()
         if history:
             df_hist = pd.DataFrame(history)
             display_cols = ['company_name', 'city', 'report_type', 'period_type', 'data_source', 'generated_at', 'review_status', 'batch_id']
             st.dataframe(df_hist[display_cols], use_container_width=True)
-            
             batches = load_job_batches()
             if batches:
                 st.subheader("📦 批次作业")
                 st.dataframe(pd.DataFrame(batches), use_container_width=True)
         else:
             st.info("暂无导出记录")
-    
     with tab2:
         history = load_export_history()
         pending = [h for h in history if h.get('review_status') == 'pending']
@@ -1627,7 +1512,6 @@ elif page == "📋 导出历史与复核":
                         st.rerun()
         else:
             st.success("✅ 暂无待复核报表")
-    
     with tab3:
         st.markdown("**📊 核验状态**")
         batches = load_job_batches()
@@ -1636,37 +1520,29 @@ elif page == "📋 导出历史与复核":
                 batch_id = batch['id']
                 progress = get_verification_progress(batch_id)
                 status = load_verification_status(batch_id)
-                
                 st.markdown(f"**批次：{batch.get('batch_name', batch_id)}**")
                 col1, col2 = st.columns([2, 1])
                 with col1:
-                    # 进度条
                     st.progress(progress['completed'] / progress['total'] if progress['total'] > 0 else 0)
                     st.caption(f"{progress['completed']}/{progress['total']} 项已完成")
-                    
-                    # 待处理清单
                     for item in progress['items']:
                         icon = "✅" if item['done'] else "❌"
                         st.write(f"{icon} {item['name']}")
-                
                 with col2:
                     st.write(f"导出类型：{status.get('export_type', '验证版') if status else '验证版'}")
                     if status and status.get('reviewer_name'):
                         st.write(f"复核人：{status['reviewer_name']}")
                     st.write(f"状态：{'✅ 可导出正式版' if progress['completed'] == progress['total'] else '⏳ 待完成核验'}")
-                    
-                    # 操作按钮
+                    # 操作：正式版导出必须全部核验完成
                     if progress['completed'] == progress['total']:
                         if st.button(f"📤 导出正式版", key=f"formal_{batch_id}"):
                             st.success(f"正式版导出成功！批次：{batch.get('batch_name', batch_id)}")
                     else:
                         if st.button(f"📤 跳过核验导出验证版", key=f"verify_{batch_id}"):
-                            # 更新为验证版导出
                             if status:
                                 update_verification_status(batch_id, 'export_type', '验证版')
                             st.success(f"验证版导出成功！批次：{batch.get('batch_name', batch_id)}")
-                    
-                    # 核验操作（逐项标记完成）
+                    # 逐项标记核验
                     if status:
                         col_a, col_b = st.columns(2)
                         with col_a:
@@ -1687,7 +1563,6 @@ elif page == "📋 导出历史与复核":
                                 if st.button(f"✅ 数据已核对", key=f"data_{batch_id}"):
                                     update_verification_status(batch_id, 'data_verified', 1)
                                     st.rerun()
-                    
                     # 设置复核人
                     with st.form(key=f"reviewer_form_{batch_id}"):
                         reviewer_name = st.text_input("复核人姓名", value=status.get('reviewer_name', '') if status else '')
@@ -1697,7 +1572,6 @@ elif page == "📋 导出历史与复核":
                                 st.success("复核人已保存")
                                 st.rerun()
                             else:
-                                # 创建新的核验状态
                                 save_verification_status({
                                     'batch_id': batch_id,
                                     'source_verified': 0,
@@ -1718,7 +1592,6 @@ elif page == "📋 导出历史与复核":
 elif page == "💾 备份与恢复":
     st.subheader("💾 备份与恢复")
     st.markdown("**自动备份**：每次操作后自动备份，保留最近30份")
-    
     backups = get_backup_list()
     if backups:
         st.write(f"共 {len(backups)} 份备份")
@@ -1731,7 +1604,6 @@ elif page == "💾 备份与恢复":
                 st.error("恢复失败")
     else:
         st.info("暂无备份")
-    
     if st.button("手动备份当前数据"):
         path = backup_database()
         if path:
@@ -1751,9 +1623,7 @@ else:
         companies = valid_companies
         if not companies:
             st.stop()
-    
     all_provinces = sorted(set(c['province'] for c in companies if c['province']))
-    
     col1, col2, col3 = st.columns(3)
     with col1:
         province = st.selectbox("省份", [""] + all_provinces, key="report_province")
@@ -1794,13 +1664,10 @@ else:
                 st.error("起始月份不能大于结束月份")
                 period_label = "自定义"
                 custom_period = ""
-    
     selected_companies = [c for c in company_list if c['company_name'] in selected_company_names]
-    
     if selected_companies and report_type:
         matched, match_level, candidates = match_template_with_details(province, city, district, report_type)
         custom_templates = load_custom_templates()
-        
         options = {}
         if matched:
             options[f"✅ 官方模板：{matched['template_name']}（{match_level}）"] = {'type': 'official', 'data': matched}
@@ -1810,7 +1677,6 @@ else:
         for ct in custom_templates:
             options[f"⭐ 自定义模板：{ct['name']}"] = {'type': 'custom', 'data': ct}
         options["🔄 通用模板（系统内置）"] = {'type': 'general', 'data': None}
-        
         if options:
             default_idx = 0
             keys = list(options.keys())
@@ -1823,7 +1689,6 @@ else:
             template_choice = options[selected_key]
         else:
             template_choice = {'type': 'general', 'data': None}
-        
         selected_template = None
         if template_choice['type'] == 'official':
             selected_template = template_choice['data']
@@ -1839,7 +1704,6 @@ else:
                 'required_fields': '纳税人识别号,公司名称,申报金额',
                 'source_url': '#'
             }
-        
         # ---- 依据匹配详情 ----
         with st.expander("📋 依据匹配（来源 / 模板 / 规则）", expanded=True):
             st.markdown("**匹配结果**")
@@ -1867,6 +1731,8 @@ else:
                     if rule:
                         st.write(f"规则来源：{rule.get('source_quote', '未配置')}")
                         st.write(f"规则版本：{rule.get('rule_version', 'v1.0')}")
+                        st.write(f"来源链接：{rule.get('source_url', '#')}")
+                        st.write(f"来源标题：{rule.get('source_title', '')}")
                         st.write(f"生效日期：{rule.get('effective_date', '未知')}")
                     else:
                         st.write("规则：未匹配，将使用默认值")
@@ -1877,11 +1743,10 @@ else:
             for comp in selected_companies:
                 r = get_rule_for_city(comp['city'], comp.get('province'))
                 if r:
-                    rule_status.append(f"{comp['company_name']} → {comp['city']} (规则：{r.get('source_quote', '默认')})")
+                    rule_status.append(f"{comp['company_name']} → {comp['city']} (规则：{r.get('source_quote', '默认')}, 版本：{r.get('rule_version', 'v1.0')})")
                 else:
                     rule_status.append(f"{comp['company_name']} → {comp['city']} (⚠️ 将使用默认值)")
             st.write("\n".join(rule_status))
-        
         # ---- 字段映射预览 ----
         with st.expander("📋 字段映射预览", expanded=False):
             fields = selected_template.get('required_fields', '').split(',')
@@ -1892,10 +1757,16 @@ else:
                     source = selected_template.get('field_mapping_source', '自动映射')
                     mapping_data.append({'字段': f, '来源字段': f, '映射方式': source})
                 st.dataframe(pd.DataFrame(mapping_data), use_container_width=True)
-        
-        reviewed = st.checkbox("✅ 我已人工复核确认数据无误", value=False, key="final_review")
-        
-        if st.button("📥 生成待复核版Excel", disabled=not reviewed, key="generate_report"):
+        # 强制复核：只有通过复核的报表才能导出正式版
+        st.warning("⚠️ 根据合规要求，所有正式导出必须经过人工复核。")
+        reviewed = st.checkbox("✅ 我已人工复核确认数据无误，并核实了官方来源", value=False, key="final_review")
+        export_type = st.radio("导出类型", ["验证版（可跳过复核）", "正式版（需完成复核）"], key="export_type_radio", horizontal=True)
+        if export_type == "正式版（需完成复核）" and not reviewed:
+            st.error("导出正式版必须勾选复核确认")
+            disabled = True
+        else:
+            disabled = not reviewed
+        if st.button("📥 生成报表", disabled=disabled, key="generate_report"):
             if not selected_template:
                 st.error("请先选择模板")
             else:
@@ -1903,7 +1774,6 @@ else:
                     st.warning("⚠️ 当前数据存在异常（见数据质量报告），是否继续生成？")
                     if not st.checkbox("继续生成（忽略异常）", key="ignore_errors"):
                         st.stop()
-                
                 batch_id = generate_batch_id()
                 batch_name = f"批量导出_{datetime.now().strftime('%Y%m%d_%H%M')}"
                 save_batch_job({
@@ -1917,7 +1787,6 @@ else:
                     'parameters': {'province': province, 'city': city, 'report_type': report_type, 'period': period_label},
                     'created_by': '系统'
                 })
-                
                 # 创建核验状态
                 save_verification_status({
                     'batch_id': batch_id,
@@ -1927,15 +1796,13 @@ else:
                     'data_verified': 0,
                     'reviewer_name': '',
                     'verified_at': datetime.now().isoformat(),
-                    'export_type': '验证版'
+                    'export_type': '验证版' if export_type == "验证版（可跳过复核）" else '正式版'
                 })
-                
                 generated_files = []
                 summary = []
                 errors = []
                 job_details = []
                 data_source_text = st.session_state.get('data_sheet_name', '未知')
-                
                 for comp in selected_companies:
                     try:
                         rule = get_rule_for_city(comp['city'], comp.get('province'))
@@ -1949,13 +1816,17 @@ else:
                                 'social_max': 999999,
                                 'fund_min': 0,
                                 'fund_max': 999999,
-                                'source_quote': '全局默认'
+                                'source_quote': '全局默认',
+                                'rule_version': 'v1.0',
+                                'source_title': '系统内置默认值',
+                                'source_url': '#',
+                                'source_publish_date': datetime.now().strftime('%Y-%m-%d'),
+                                'applicable_region': '全国',
+                                'official_channel': '系统内置'
                             }
-                        
                         fields = selected_template.get('required_fields', '').split(',')
                         if not fields or not fields[0]:
                             fields = ['纳税人识别号', '公司名称', '申报金额']
-                        
                         if 'imported_df' in st.session_state and st.session_state['imported_df'] is not None:
                             df_data = st.session_state['imported_df']
                             company_col = None
@@ -2008,40 +1879,43 @@ else:
                                 '应补退税额': '0.00'
                             }
                             row_data = [sample_data.get(f, '') for f in fields]
-                        
                         wb = Workbook()
                         ws = wb.active
                         ws.title = "申报表"
                         ws.append(fields)
                         ws.append(row_data)
-                        
+                        # 添加模板和规则信息到表头
                         ws.insert_rows(1)
-                        ws['A1'] = f'【系统生成 - 待复核版】统计口径：{period_label}'
+                        ws['A1'] = f'【系统生成 - {export_type}】统计口径：{period_label}'
                         ws['A1'].font = Font(color='FF0000', bold=True, size=14)
                         ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(fields) if fields else 1)
                         ws['A1'].alignment = Alignment(horizontal='center')
                         ws['A1'].fill = PatternFill(start_color='FFF9E6', end_color='FFF9E6', fill_type='solid')
-                        
                         ws.insert_rows(2)
                         ws['A2'] = f'模板名称：{selected_template["template_name"]}  版本：{selected_template.get("template_version", "v1.0")}'
                         ws['A2'].font = Font(color='666666', size=10)
                         ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=len(fields) if fields else 1)
-                        
                         ws.insert_rows(3)
                         ws['A3'] = f'来源：{selected_template.get("source_authority", "系统内置")}  发布日期：{selected_template.get("publish_date", datetime.now().strftime("%Y-%m-%d"))}'
                         ws['A3'].font = Font(color='666666', size=10)
                         ws.merge_cells(start_row=3, start_column=1, end_row=3, end_column=len(fields) if fields else 1)
-                        
                         ws.insert_rows(4)
-                        ws['A4'] = f'数据来源：{data_source_text}  统计口径：{period_label}  规则来源：{rule.get("source_quote", "未配置")}'
+                        ws['A4'] = f'数据来源：{data_source_text}  统计口径：{period_label}'
                         ws['A4'].font = Font(color='666666', size=10)
                         ws.merge_cells(start_row=4, start_column=1, end_row=4, end_column=len(fields) if fields else 1)
-                        
+                        ws.insert_rows(5)
+                        ws['A5'] = f'规则来源：{rule.get("source_quote", "未配置")}  规则版本：{rule.get("rule_version", "v1.0")}'
+                        ws['A5'].font = Font(color='666666', size=10)
+                        ws.merge_cells(start_row=5, start_column=1, end_row=5, end_column=len(fields) if fields else 1)
+                        ws.insert_rows(6)
+                        ws['A6'] = f'来源链接：{rule.get("source_url", "#")}  来源标题：{rule.get("source_title", "")}'
+                        ws['A6'].font = Font(color='666666', size=10)
+                        ws.merge_cells(start_row=6, start_column=1, end_row=6, end_column=len(fields) if fields else 1)
+                        # 年检汇总
                         ws_annual = wb.create_sheet("年检汇总")
                         ws_annual.append(['年检汇总数据'])
                         ws_annual.merge_cells('A1:B1')
                         ws_annual['A1'].font = Font(bold=True, size=12)
-                        
                         if 'imported_df' in st.session_state and st.session_state['imported_df'] is not None:
                             df_all = st.session_state['imported_df']
                             social_col = None
@@ -2067,7 +1941,6 @@ else:
                                     total_col = col
                                 elif '参保人数' in col_str:
                                     people_col = col
-                            
                             if social_col:
                                 social_total = df_all[social_col].sum()
                             else:
@@ -2080,7 +1953,6 @@ else:
                                 total_people = df_all[people_col].sum()
                             else:
                                 total_people = len(df_all)
-                            
                             if unit_col and personal_col:
                                 unit_total = df_all[unit_col].sum()
                                 personal_total = df_all[personal_col].sum()
@@ -2096,7 +1968,6 @@ else:
                             unit_total = 0
                             personal_total = 0
                             grand_total = 0
-                        
                         ws_annual.append(['公司名称', comp['company_name']])
                         ws_annual.append(['所属城市', comp['city']])
                         ws_annual.append(['统计口径', period_label])
@@ -2109,15 +1980,15 @@ else:
                         ws_annual.append(['报告生成时间', datetime.now().strftime('%Y-%m-%d %H:%M:%S')])
                         ws_annual.append(['数据来源', data_source_text])
                         ws_annual.append(['规则来源', rule.get('source_quote', '未配置')])
-                        
+                        ws_annual.append(['规则版本', rule.get('rule_version', 'v1.0')])
+                        ws_annual.append(['来源链接', rule.get('source_url', '#')])
+                        ws_annual.append(['来源标题', rule.get('source_title', '')])
                         audit = wb.create_sheet("审计日志")
                         audit.append(['操作时间', '操作类型', '操作人', '详情'])
                         audit.append([datetime.now().isoformat(), 'GENERATED', '系统', f'公司:{comp["company_name"]}, 城市:{comp["city"]}, 模板:{selected_template["template_name"]}, 统计口径:{period_label}, 规则:{rule.get("source_quote", "未配置")}'])
-                        
                         output = BytesIO()
                         wb.save(output)
                         output.seek(0)
-                        
                         fname = f"{comp['company_name']}_{report_type}_{period_label.replace('（','_').replace('）','').replace('-','_')}_{datetime.now().strftime('%Y%m%d')}.xlsx"
                         generated_files.append((fname, output.getvalue()))
                         summary.append({
@@ -2126,9 +1997,9 @@ else:
                             '模板': selected_template['template_name'],
                             '统计口径': period_label,
                             '规则来源': rule.get('source_quote', '未配置'),
+                            '规则版本': rule.get('rule_version', 'v1.0'),
                             '状态': '待复核'
                         })
-                        
                         job_details.append({
                             'id': str(uuid.uuid4())[:8],
                             'batch_id': batch_id,
@@ -2146,7 +2017,6 @@ else:
                             'rule_source': rule.get('source_quote', '未配置'),
                             'data_source': data_source_text
                         })
-                        
                         save_export({
                             'id': str(uuid.uuid4())[:8],
                             'company_id': comp['id'],
@@ -2187,10 +2057,8 @@ else:
                             'rule_source': '',
                             'data_source': data_source_text
                         })
-                
                 save_job_details(job_details)
                 update_batch_status(batch_id, 'completed', 'pending')
-                
                 if errors:
                     for err in errors:
                         st.warning(err)
