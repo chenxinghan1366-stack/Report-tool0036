@@ -498,6 +498,13 @@ PROVINCE_DEFAULT_RULES = [
     {'city': '南宁', 'province': '广西', 'unit_social': 0.16, 'personal_social': 0.08,
      'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3600, 'social_max': 18000,
      'fund_min': 1800, 'fund_max': 21600, 'source_quote': '南人社发〔2024〕4号'},
+    # ---- 新增襄阳、绵阳（避免遗漏） ----
+    {'city': '襄阳', 'province': '湖北', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 0, 'social_max': 999999,
+     'fund_min': 0, 'fund_max': 999999, 'source_quote': '系统默认（建议核实）'},
+    {'city': '绵阳', 'province': '四川', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 0, 'social_max': 999999,
+     'fund_min': 0, 'fund_max': 999999, 'source_quote': '系统默认（建议核实）'},
 ]
 
 # ========== 确保默认规则 ==========
@@ -646,7 +653,7 @@ def auto_load_sheet_with_header_detection(file, sheet_name):
         df = df.dropna(how='all')
         return df, 0
 
-# ========== 解析Excel ==========
+# ========== 解析Excel（强制转换为字符串） ==========
 def parse_uploaded_excel(file):
     xls = pd.ExcelFile(file)
     sheets = xls.sheet_names
@@ -684,6 +691,7 @@ def parse_uploaded_excel(file):
                         district_col = col
                 if city_col and company_col:
                     for _, row in df.iterrows():
+                        # 强制转换为字符串，处理数字或NaN
                         city = str(row[city_col]) if pd.notna(row[city_col]) else ''
                         company = str(row[company_col]) if pd.notna(row[company_col]) else ''
                         district = str(row[district_col]) if district_col and pd.notna(row[district_col]) else ''
@@ -747,7 +755,7 @@ def validate_data(df, rules):
     city_rule_map = {normalize_name(r['city']): r for r in rules}
     error_rows = {}
     
-    # ----- 修复：只检测真正的数值列，排除“校验”“状态”等非数值列 -----
+    # 只检测真正的数值列，排除“校验”“状态”等
     numeric_cols = []
     for col in df.columns:
         col_lower = col.lower()
@@ -764,7 +772,7 @@ def validate_data(df, rules):
         else:
             norm_city = normalize_name(city)
             if norm_city not in city_rule_map:
-                row_errors.append(f'城市"{city}"未在规则库中')
+                row_errors.append(f'城市"{city}"未在规则库中（将使用默认值）')
         
         for col in numeric_cols:
             val = row[col]
@@ -809,19 +817,37 @@ def validate_data(df, rules):
         'error_rows_detail': error_rows
     }
 
-# ========== 获取规则 ==========
-def get_rule_for_city(city):
+# ========== 核心：获取规则（含省份兜底和全局默认） ==========
+def get_rule_for_city(city, province=None):
     if not city:
         return None
     rules = load_rules()
     norm_city = normalize_name(city)
+    # 精确匹配城市
     for r in rules:
         if normalize_name(r['city']) == norm_city:
             return r
-    for r in rules:
-        if normalize_name(r.get('province', '')) == norm_city:
-            return r
-    return None
+    # 省份匹配
+    if province:
+        norm_prov = normalize_name(province)
+        for r in rules:
+            if normalize_name(r.get('province', '')) == norm_prov:
+                # 返回该省份第一个匹配规则的副本，标记来源
+                fallback = r.copy()
+                fallback['source_quote'] = f"省份默认（{province}）"
+                return fallback
+    # 全局默认
+    return {
+        'unit_social': 0.16,
+        'personal_social': 0.08,
+        'unit_fund': 0.12,
+        'personal_fund': 0.12,
+        'social_min': 0,
+        'social_max': 999999,
+        'fund_min': 0,
+        'fund_max': 999999,
+        'source_quote': '全局默认'
+    }
 
 def get_data_source_info(df):
     info = {}
@@ -954,38 +980,36 @@ elif page == "📤 数据导入":
         with st.spinner("正在解析Excel..."):
             companies, unmapped, all_sheets = parse_multiple_files(uploaded_files)
             if companies:
-                valid_companies = [c for c in companies if c['province']]
-                if len(valid_companies) < len(companies):
-                    st.warning(f"⚠️ 有 {len(companies) - len(valid_companies)} 家公司因城市无法识别（{', '.join(unmapped)}）而被忽略，请在规则管理中手动添加这些城市。")
-                if valid_companies:
-                    save_companies(valid_companies)
-                    st.success(f"成功提取 {len(valid_companies)} 家公司，来自 {len(uploaded_files)} 个文件")
-                    st.session_state['uploaded_files'] = uploaded_files
-                    st.session_state['all_sheets'] = all_sheets
-                    if uploaded_files:
-                        first_file = uploaded_files[0]
-                        xls = pd.ExcelFile(first_file)
-                        sheets = xls.sheet_names
-                        default_sheet = None
-                        for kw in ['明细', '月度', '数据', '工资', '社保', '员工', '月报']:
-                            for s in sheets:
-                                if kw in s:
-                                    default_sheet = s
-                                    break
-                            if default_sheet:
+                # 不再丢弃省份为空的记录，而是保留并显示警告
+                valid_companies = companies  # 全部保留
+                if unmapped:
+                    st.warning(f"⚠️ 以下城市未在规则库中找到：{', '.join(unmapped)}，将使用全局默认规则，请在规则管理中补充以获得更准确的数据。")
+                save_companies(valid_companies)
+                st.success(f"成功提取 {len(valid_companies)} 家公司，来自 {len(uploaded_files)} 个文件")
+                st.session_state['uploaded_files'] = uploaded_files
+                st.session_state['all_sheets'] = all_sheets
+                if uploaded_files:
+                    first_file = uploaded_files[0]
+                    xls = pd.ExcelFile(first_file)
+                    sheets = xls.sheet_names
+                    default_sheet = None
+                    for kw in ['明细', '月度', '数据', '工资', '社保', '员工', '月报']:
+                        for s in sheets:
+                            if kw in s:
+                                default_sheet = s
                                 break
-                        if not default_sheet and sheets:
-                            default_sheet = sheets[0]
                         if default_sheet:
-                            df, header_row = auto_load_sheet_with_header_detection(first_file, default_sheet)
-                            st.session_state['imported_df'] = df
-                            st.session_state['data_sheet_name'] = default_sheet
-                            st.session_state['data_header_row'] = header_row
-                            rules = load_rules()
-                            st.session_state['validation_report'] = validate_data(df, rules)
-                            st.success(f"已自动加载 Sheet「{default_sheet}」（表头行: {header_row+1}），共 {len(df)} 行数据")
-                else:
-                    st.error("未能识别任何有效公司，请确认城市列包含已配置的城市")
+                            break
+                    if not default_sheet and sheets:
+                        default_sheet = sheets[0]
+                    if default_sheet:
+                        df, header_row = auto_load_sheet_with_header_detection(first_file, default_sheet)
+                        st.session_state['imported_df'] = df
+                        st.session_state['data_sheet_name'] = default_sheet
+                        st.session_state['data_header_row'] = header_row
+                        rules = load_rules()
+                        st.session_state['validation_report'] = validate_data(df, rules)
+                        st.success(f"已自动加载 Sheet「{default_sheet}」（表头行: {header_row+1}），共 {len(df)} 行数据")
             else:
                 st.warning("未识别到公司数据，请确认Excel包含「城市」和「公司」列")
     
@@ -1347,7 +1371,7 @@ if not companies:
 else:
     valid_companies = [c for c in companies if c['province']]
     if len(valid_companies) < len(companies):
-        st.warning(f"⚠️ 有 {len(companies) - len(valid_companies)} 家公司的省份无法识别")
+        st.warning(f"⚠️ 有 {len(companies) - len(valid_companies)} 家公司的省份无法识别，将使用全局默认规则")
         companies = valid_companies
         if not companies:
             st.stop()
@@ -1463,7 +1487,7 @@ else:
                 st.markdown("**规则**")
                 if selected_companies:
                     first_comp = selected_companies[0]
-                    rule = get_rule_for_city(first_comp['city'])
+                    rule = get_rule_for_city(first_comp['city'], first_comp.get('province'))
                     if rule:
                         st.write(f"规则来源：{rule.get('source_quote', '未配置')}")
                         st.write(f"规则版本：{rule.get('rule_version', 'v1.0')}")
@@ -1475,7 +1499,7 @@ else:
             st.markdown("**所有公司规则匹配状态**")
             rule_status = []
             for comp in selected_companies:
-                r = get_rule_for_city(comp['city'])
+                r = get_rule_for_city(comp['city'], comp.get('province'))
                 if r:
                     rule_status.append(f"{comp['company_name']} → {comp['city']} (规则：{r.get('source_quote', '默认')})")
                 else:
@@ -1526,33 +1550,20 @@ else:
                 
                 for comp in selected_companies:
                     try:
-                        rule = get_rule_for_city(comp['city'])
+                        rule = get_rule_for_city(comp['city'], comp.get('province'))
                         if rule is None:
-                            default_rule = next((dr for dr in PROVINCE_DEFAULT_RULES if normalize_name(dr['city']) == normalize_name(comp['city'])), None)
-                            if default_rule:
-                                rule = {
-                                    'unit_social': default_rule['unit_social'],
-                                    'personal_social': default_rule['personal_social'],
-                                    'unit_fund': default_rule['unit_fund'],
-                                    'personal_fund': default_rule['personal_fund'],
-                                    'social_min': default_rule.get('social_min', 0),
-                                    'social_max': default_rule.get('social_max', 999999),
-                                    'fund_min': default_rule.get('fund_min', 0),
-                                    'fund_max': default_rule.get('fund_max', 999999),
-                                    'source_quote': default_rule.get('source_quote', '系统默认')
-                                }
-                            else:
-                                rule = {
-                                    'unit_social': 0.16,
-                                    'personal_social': 0.08,
-                                    'unit_fund': 0.12,
-                                    'personal_fund': 0.12,
-                                    'social_min': 0,
-                                    'social_max': 999999,
-                                    'fund_min': 0,
-                                    'fund_max': 999999,
-                                    'source_quote': '系统默认'
-                                }
+                            # 如果还未有规则，使用全局默认（实际上 get_rule_for_city 已保证非 None）
+                            rule = {
+                                'unit_social': 0.16,
+                                'personal_social': 0.08,
+                                'unit_fund': 0.12,
+                                'personal_fund': 0.12,
+                                'social_min': 0,
+                                'social_max': 999999,
+                                'fund_min': 0,
+                                'fund_max': 999999,
+                                'source_quote': '全局默认'
+                            }
                         
                         fields = selected_template.get('required_fields', '').split(',')
                         if not fields or not fields[0]:
