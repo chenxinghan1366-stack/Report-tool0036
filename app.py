@@ -740,10 +740,8 @@ def get_province_for_city(city_name):
     if not city_name:
         return None
     city_norm = normalize_name(city_name)
-    # 先精确匹配
     if city_norm in CHINA_PROVINCE_MAP:
         return CHINA_PROVINCE_MAP[city_norm]
-    # 模糊匹配：检查城市名是否包含在键中
     for key, province in CHINA_PROVINCE_MAP.items():
         if key in city_norm or city_norm in key:
             return province
@@ -1147,7 +1145,6 @@ def parse_companies_from_sheet(file, sheet_name, user_id="default"):
             city_col, company_col, district_col = detect_columns(df)
         if not city_col or not company_col:
             return [], set(), list(df.columns)
-        # 构建城市-省份映射（从规则库）
         city_province_map = {}
         for r in load_rules():
             key = normalize_name(r['city'])
@@ -1161,16 +1158,14 @@ def parse_companies_from_sheet(file, sheet_name, user_id="default"):
             if not city or not company:
                 continue
             norm_city = normalize_name(city)
-            # 先尝试从规则库获取省份
             province = city_province_map.get(norm_city, '')
-            # 如果规则库中没有，尝试从省份映射表获取
             if not province:
                 mapped_province = get_province_for_city(norm_city)
                 if mapped_province:
                     province = mapped_province
                 else:
                     unmapped_cities.add(city)
-                    province = ''  # 暂时留空，后续由用户选择
+                    province = ''
             companies.append({
                 'company_name': company,
                 'province': province,
@@ -1267,7 +1262,7 @@ def get_rule_for_city(city, province=None):
     new_rule = {
         'id': str(uuid.uuid4())[:8],
         'city': city,
-        'province': province or '未知',
+        'province': province or '',
         'unit_social': 0.16,
         'personal_social': 0.08,
         'unit_fund': 0.12,
@@ -2431,14 +2426,13 @@ companies = load_companies()
 if not companies:
     st.info("👈 请先在「数据导入」页面上传包含公司/城市数据的Excel")
 else:
-    # 过滤掉 province 为空的公司，但先尝试用映射表补全
+    # 过滤掉 province 为空的公司
     companies_with_province = []
     unmapped_companies = []
     for c in companies:
         if c['province']:
             companies_with_province.append(c)
         else:
-            # 尝试从映射表补全
             mapped_province = get_province_for_city(c['city'])
             if mapped_province:
                 c['province'] = mapped_province
@@ -2491,7 +2485,6 @@ else:
         else:
             company_list = []
         company_names = [c['company_name'] for c in company_list]
-        # 修复：过滤掉不在当前 company_names 中的默认值
         default_selected = st.session_state.get('batch_selected_companies', [])
         valid_default = [name for name in default_selected if name in company_names]
         selected_company_names = st.multiselect("公司（可多选）", company_names, default=valid_default, key="report_companies")
