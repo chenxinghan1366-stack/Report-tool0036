@@ -700,6 +700,55 @@ def normalize_name(name):
             name = name[:-len(suffix)]
     return name.strip()
 
+# ========== 中国省份标准映射表 ==========
+CHINA_PROVINCE_MAP = {
+    '北京': '北京市', '上海': '上海市', '天津': '天津市', '重庆': '重庆市',
+    '广东': '广东省', '广州': '广东省', '深圳': '广东省', '东莞': '广东省', '佛山': '广东省',
+    '江苏': '江苏省', '南京': '江苏省', '苏州': '江苏省',
+    '浙江': '浙江省', '杭州': '浙江省', '宁波': '浙江省',
+    '四川': '四川省', '成都': '四川省', '绵阳': '四川省',
+    '湖北': '湖北省', '武汉': '湖北省', '襄阳': '湖北省',
+    '山东': '山东省', '青岛': '山东省', '济南': '山东省',
+    '陕西': '陕西省', '西安': '陕西省',
+    '辽宁': '辽宁省', '沈阳': '辽宁省', '大连': '辽宁省',
+    '福建': '福建省', '福州': '福建省', '厦门': '福建省',
+    '河北': '河北省', '石家庄': '河北省',
+    '安徽': '安徽省', '合肥': '安徽省',
+    '江西': '江西省', '南昌': '江西省',
+    '山西': '山西省', '太原': '山西省',
+    '吉林': '吉林省', '长春': '吉林省',
+    '黑龙江': '黑龙江省', '哈尔滨': '黑龙江省',
+    '云南': '云南省', '昆明': '云南省', '曲靖': '云南省', '玉溪': '云南省',
+    '贵州': '贵州省', '贵阳': '贵州省', '遵义': '贵州省', '六盘水': '贵州省',
+    '甘肃': '甘肃省', '兰州': '甘肃省', '酒泉': '甘肃省', '张掖': '甘肃省',
+    '青海': '青海省', '西宁': '青海省', '海东': '青海省', '格尔木': '青海省',
+    '宁夏': '宁夏回族自治区', '银川': '宁夏回族自治区', '石嘴山': '宁夏回族自治区', '吴忠': '宁夏回族自治区',
+    '内蒙古': '内蒙古自治区', '呼和浩特': '内蒙古自治区', '包头': '内蒙古自治区', '鄂尔多斯': '内蒙古自治区',
+    '新疆': '新疆维吾尔自治区', '乌鲁木齐': '新疆维吾尔自治区',
+    '西藏': '西藏自治区', '拉萨': '西藏自治区',
+    '海南': '海南省', '海口': '海南省',
+    '广西': '广西壮族自治区', '南宁': '广西壮族自治区',
+    '河南': '河南省',
+    '湖南': '湖南省',
+    '台湾': '台湾省',
+    '香港': '香港特别行政区',
+    '澳门': '澳门特别行政区',
+}
+
+def get_province_for_city(city_name):
+    """根据城市名获取省份（支持模糊匹配）"""
+    if not city_name:
+        return None
+    city_norm = normalize_name(city_name)
+    # 先精确匹配
+    if city_norm in CHINA_PROVINCE_MAP:
+        return CHINA_PROVINCE_MAP[city_norm]
+    # 模糊匹配：检查城市名是否包含在键中
+    for key, province in CHINA_PROVINCE_MAP.items():
+        if key in city_norm or city_norm in key:
+            return province
+    return None
+
 # ========== 模板库预置 ==========
 PRESET_TEMPLATES = [
     {'id': 'tpl_vat_general', 'province': '全国', 'city': '全国', 'district': '',
@@ -1098,6 +1147,7 @@ def parse_companies_from_sheet(file, sheet_name, user_id="default"):
             city_col, company_col, district_col = detect_columns(df)
         if not city_col or not company_col:
             return [], set(), list(df.columns)
+        # 构建城市-省份映射（从规则库）
         city_province_map = {}
         for r in load_rules():
             key = normalize_name(r['city'])
@@ -1111,9 +1161,16 @@ def parse_companies_from_sheet(file, sheet_name, user_id="default"):
             if not city or not company:
                 continue
             norm_city = normalize_name(city)
+            # 先尝试从规则库获取省份
             province = city_province_map.get(norm_city, '')
+            # 如果规则库中没有，尝试从省份映射表获取
             if not province:
-                unmapped_cities.add(city)
+                mapped_province = get_province_for_city(norm_city)
+                if mapped_province:
+                    province = mapped_province
+                else:
+                    unmapped_cities.add(city)
+                    province = ''  # 暂时留空，后续由用户选择
             companies.append({
                 'company_name': company,
                 'province': province,
@@ -1472,7 +1529,11 @@ elif page == "📤 数据导入":
                             norm_city = normalize_name(city)
                             province = city_province_map.get(norm_city, '')
                             if not province:
-                                unmapped.add(city)
+                                mapped_province = get_province_for_city(norm_city)
+                                if mapped_province:
+                                    province = mapped_province
+                                else:
+                                    unmapped.add(city)
                             companies.append({
                                 'company_name': company,
                                 'province': province,
@@ -2370,12 +2431,32 @@ companies = load_companies()
 if not companies:
     st.info("👈 请先在「数据导入」页面上传包含公司/城市数据的Excel")
 else:
-    valid_companies = [c for c in companies if c['province']]
-    if len(valid_companies) < len(companies):
-        st.warning(f"⚠️ 有 {len(companies) - len(valid_companies)} 家公司的省份无法识别，将使用全局默认规则")
-        companies = valid_companies
-        if not companies:
-            st.stop()
+    # 过滤掉 province 为空的公司，但先尝试用映射表补全
+    companies_with_province = []
+    unmapped_companies = []
+    for c in companies:
+        if c['province']:
+            companies_with_province.append(c)
+        else:
+            # 尝试从映射表补全
+            mapped_province = get_province_for_city(c['city'])
+            if mapped_province:
+                c['province'] = mapped_province
+                companies_with_province.append(c)
+            else:
+                unmapped_companies.append(c)
+    
+    if unmapped_companies:
+        st.warning(f"⚠️ 有 {len(unmapped_companies)} 家公司的省份无法自动识别，已跳过")
+        with st.expander("查看无法识别的公司"):
+            for uc in unmapped_companies:
+                st.write(f"- {uc['company_name']}（{uc['city']}）")
+    
+    if not companies_with_province:
+        st.error("❌ 没有可用的公司数据，请检查数据导入")
+        st.stop()
+    
+    companies = companies_with_province
     all_provinces = sorted(set(c['province'] for c in companies if c['province']))
     
     st.markdown("**批量选择公司（按省份/城市）**")
@@ -2410,7 +2491,7 @@ else:
         else:
             company_list = []
         company_names = [c['company_name'] for c in company_list]
-        # ✅ 修复：过滤掉不在当前 company_names 中的默认值
+        # 修复：过滤掉不在当前 company_names 中的默认值
         default_selected = st.session_state.get('batch_selected_companies', [])
         valid_default = [name for name in default_selected if name in company_names]
         selected_company_names = st.multiselect("公司（可多选）", company_names, default=valid_default, key="report_companies")
