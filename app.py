@@ -1365,12 +1365,12 @@ def df_to_html_table(df):
     html = "<table border='1' style='border-collapse:collapse;font-family:SimSun,serif;'>"
     html += "<thead><tr>"
     for col in df.columns:
-        html += f"<th style='background:#4472C4;color:white;padding:8px;'>{col}</th>"
+        html += "<th style='background:#4472C4;color:white;padding:8px;'>" + str(col) + "</th>"
     html += "</tr></thead><tbody>"
     for _, row in df.iterrows():
         html += "<tr>"
         for val in row:
-            html += f"<td style='padding:6px;'>{val}</td>
+            html += "<td style='padding:6px;'>" + str(val) + "</td>"
         html += "</tr>"
     html += "</tbody></table>"
     return html
